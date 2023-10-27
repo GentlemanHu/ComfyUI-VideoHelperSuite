@@ -1,3 +1,4 @@
+from notifier.notify import notifyAll
 import os
 import json
 import subprocess
@@ -206,6 +207,8 @@ class VideoCombine:
                     else:
                         raise
 
+        notifyAll(file_path,f"{prompt}")
+        
         previews = [
             {
                 "filename": file,
