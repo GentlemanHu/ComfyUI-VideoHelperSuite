@@ -215,7 +215,7 @@ class VideoCombine:
                 print(res.stderr.decode("utf-8"), end="", file=sys.stderr)
 
 
-        notifyAll(file_path,f"{prompt}")
+
         
 
             # Audio Injection ater video is created, saves additional video with -audio.mp4
@@ -252,7 +252,7 @@ class VideoCombine:
                     
                     subprocess.run(mux_args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
                 # Else block for unsupported video format can be added if necessar
-
+        notifyAll(file_path,f"{prompt}")
         previews = [
             {
                 "filename": file,
