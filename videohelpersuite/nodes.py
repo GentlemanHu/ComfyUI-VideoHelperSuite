@@ -267,16 +267,7 @@ class VideoCombine:
             output_files.append(file_path)
 
 
-<<<<<<< HEAD
-
-        
-
-            # Audio Injection ater video is created, saves additional video with -audio.mp4
-            # Accepts mp3 and wav formats
-            # TODO test unix and windows paths to make sure it works properly. Path module is Used
-=======
             # Audio Injection after video is created, saves additional video with -audio.mp4
->>>>>>> author/main
 
             # Create audio file if input was provided
             if audio:
@@ -295,21 +286,6 @@ class VideoCombine:
                             + video_format["audio_pass"] \
                             + ["-af", "apad", "-shortest", output_file_with_audio_path]
 
-<<<<<<< HEAD
-                if output_extension and audio_codec:
-                    # Modify output file name
-                    output_file_with_audio_path = file_path.with_stem(file_path.stem + "-audio").with_suffix(output_extension)
-
-                    # FFmpeg command with audio re-encoding
-                    mux_args = [
-                        ffmpeg_path, "-y", "-i", str(file_path), "-i", str(audio_file_path),
-                        "-c:v", "copy", "-c:a", audio_codec, "-b:a", "192k", "-strict", "experimental", "-shortest", str(output_file_with_audio_path)
-                    ]
-                    
-                    subprocess.run(mux_args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-                # Else block for unsupported video format can be added if necessar
-        notifyAll(file_path,f"{prompt}")
-=======
                 try:
                     res = subprocess.run(mux_args, input=audio(), env=env,
                                          capture_output=True, check=True)
@@ -323,7 +299,7 @@ class VideoCombine:
                 #It will be muted unless opened or saved with right click
                 file = output_file_with_audio
 
->>>>>>> author/main
+        notifyAll(file_path,f"{prompt}")
         previews = [
             {
                 "filename": file,
