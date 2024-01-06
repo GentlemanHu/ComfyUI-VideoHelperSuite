@@ -9,6 +9,7 @@ from typing import List
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from pathlib import Path
+import datetime
 
 import folder_paths
 from .logger import logger
@@ -304,7 +305,7 @@ class VideoCombine:
                 #It will be muted unless opened or saved with right click
                 file = output_file_with_audio
 
-        notifyAll(os.path.join(full_output_folder, file),f"{prompt}")
+        notifyAll(os.path.join(full_output_folder, file),f"{prompt}" if save_output else "===")
         previews = [
             {
                 "filename": file,
@@ -371,7 +372,10 @@ class MergeAudio:
     @classmethod
     def merge_audio(cls, audio_file_1, audio_file_2, output_file_name):
         # Get the absolute path of the output file
-        output_file_abs = os.path.abspath(output_file_name)
+        _datetime = datetime.datetime.now().strftime("%Y%m%d")
+        _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
+        
+        output_file_abs = os.path.abspath(f"audio_{_datetime}.mp3")
 
         # Construct FFmpeg command
         ffmpeg_cmd = ['ffmpeg', '-i', audio_file_1, '-i', audio_file_2, '-filter_complex',
