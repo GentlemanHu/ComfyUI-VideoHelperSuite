@@ -304,7 +304,7 @@ class VideoCombine:
                 #It will be muted unless opened or saved with right click
                 file = output_file_with_audio
 
-        notifyAll(file_path,f"{prompt}")
+        notifyAll(os.path.join(full_output_folder, file),f"{prompt}")
         previews = [
             {
                 "filename": file,
