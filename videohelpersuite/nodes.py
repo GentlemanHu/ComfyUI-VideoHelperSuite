@@ -359,7 +359,7 @@ class MergeAudio:
             "required": {
                 "audio_file_1": ("STRING", {"validate": "is_file"}),
                 "audio_file_2": ("STRING", {"validate": "is_file"}),
-                "output_file": ("STRING", {"default": "output.mp3"}),
+                "output_file_name": ("STRING", {"default": "output.mp3"}),
             },
         }
 
@@ -369,9 +369,9 @@ class MergeAudio:
     FUNCTION = "merge_audio"
 
     @classmethod
-    def merge_audio(cls, audio_file_1, audio_file_2, output_file):
+    def merge_audio(cls, audio_file_1, audio_file_2, output_file_name):
         # Get the absolute path of the output file
-        output_file_abs = os.path.abspath(output_file)
+        output_file_abs = os.path.abspath(output_file_name)
 
         # Construct FFmpeg command
         ffmpeg_cmd = ['ffmpeg', '-i', audio_file_1, '-i', audio_file_2, '-filter_complex',
@@ -387,7 +387,7 @@ class MergeAudio:
         return (lambda: audio, output_file_abs)
 
     @classmethod
-    def IS_CHANGED(cls, audio_file_1, audio_file_2, output_file):
+    def IS_CHANGED(cls, audio_file_1, audio_file_2, output_file_name):
         return hash_path(output_file)
 
     @classmethod
