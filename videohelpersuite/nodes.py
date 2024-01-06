@@ -361,19 +361,19 @@ class MergeAudio:
                 "audio_file_2": ("STRING", {"validate": "is_file"}),
             },
             "optional": {
-                "output_file": ("STRING", {"default": "output.mp3"}),
+                "merged_file": ("STRING",),
             },
         }
 
-    RETURN_TYPES = ("VHS_AUDIO", "STRING")
-    RETURN_NAMES = ("audio", "output_file")
+    RETURN_TYPES = ("VHS_AUDIO",)
+    RETURN_NAMES = ("audio",)
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "merge_audio"
 
     @classmethod
-    def merge_audio(cls, audio_file_1, audio_file_2, output_file):
+    def merge_audio(cls, audio_file_1, audio_file_2, merged_file):
         # Get the absolute path of the output file
-        output_file_abs = os.path.abspath(output_file)
+        output_file_abs = os.path.abspath(merged_file)
 
         # Construct FFmpeg command
         ffmpeg_cmd = ['ffmpeg', '-i', audio_file_1, '-i', audio_file_2, '-filter_complex',
@@ -389,8 +389,8 @@ class MergeAudio:
         return (lambda: audio, output_file_abs)
 
     @classmethod
-    def IS_CHANGED(cls, audio_file_1, audio_file_2, output_file):
-        return hash_path(output_file)
+    def IS_CHANGED(cls, audio_file_1, audio_file_2, merged_file):
+        return hash_path(merged_file)
 
     @classmethod
     def VALIDATE_INPUTS(cls, audio_file_1, audio_file_2, **kwargs):
