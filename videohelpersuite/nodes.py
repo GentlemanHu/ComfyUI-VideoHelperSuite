@@ -359,8 +359,6 @@ class MergeAudio:
             "required": {
                 "audio_file_1": ("STRING", {"validate": "is_file"}),
                 "audio_file_2": ("STRING", {"validate": "is_file"}),
-            },
-            "optional": {
                 "output_file": ("STRING", {"default": "output.mp3"}),
             },
         }
