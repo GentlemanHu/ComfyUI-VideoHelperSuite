@@ -348,6 +348,56 @@ class LoadAudio:
     def VALIDATE_INPUTS(s, audio_file, **kwargs):
         return validate_path(audio_file, allow_none=True)
 
+import os
+import subprocess
+
+class MergeAudio:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio_file_1": ("STRING", {"validate": "is_file"}),
+                "audio_file_2": ("STRING", {"validate": "is_file"}),
+            },
+            "optional": {
+                "output_file": ("STRING", {"default": "output.mp3"}),
+            },
+        }
+
+    RETURN_TYPES = ("VHS_AUDIO", "STRING")
+    RETURN_NAMES = ("audio", "output_file")
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+    FUNCTION = "merge_audio"
+
+    @classmethod
+    def merge_audio(cls, audio_file_1, audio_file_2, output_file):
+        # Get the absolute path of the output file
+        output_file_abs = os.path.abspath(output_file)
+
+        # Construct FFmpeg command
+        ffmpeg_cmd = ['ffmpeg', '-i', audio_file_1, '-i', audio_file_2, '-filter_complex',
+                      '[0:a][1:a]concat=n=2:v=0:a=1[a]', '-map', '[a]', output_file_abs]
+
+        # Execute FFmpeg command
+        subprocess.run(ffmpeg_cmd)
+
+        # Read the merged audio file
+        audio = get_audio(output_file_abs)
+
+        # Return the merged audio and output file absolute path as a lambda function
+        return (lambda: audio, output_file_abs)
+
+    @classmethod
+    def IS_CHANGED(cls, audio_file_1, audio_file_2, output_file):
+        return hash_path(output_file)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, audio_file_1, audio_file_2, **kwargs):
+        if not validate_path(audio_file_1, allow_none=True) or not validate_path(audio_file_2, allow_none=True):
+            return False
+        return True
+
+
 NODE_CLASS_MAPPINGS = {
     "VHS_VideoCombine": VideoCombine,
     "VHS_LoadVideo": LoadVideoUpload,
@@ -355,6 +405,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_LoadImages": LoadImagesFromDirectoryUpload,
     "VHS_LoadImagesPath": LoadImagesFromDirectoryPath,
     "VHS_LoadAudio": LoadAudio,
+    "VHS_MergeAudio": MergeAudio,
     # Latent and Image nodes
     "VHS_SplitLatents": SplitLatents,
     "VHS_SplitImages": SplitImages,
@@ -374,6 +425,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_LoadImages": "Load Images (Upload) 🎥🅥🅗🅢",
     "VHS_LoadImagesPath": "Load Images (Path) 🎥🅥🅗🅢",
     "VHS_LoadAudio": "Load Audio (Path)🎥🅥🅗🅢",
+    "VHS_MergeAudio": "Merge Audio 🎥🅥🅗🅢",
     # Latent and Image nodes
     "VHS_SplitLatents": "Split Latent Batch 🎥🅥🅗🅢",
     "VHS_SplitImages": "Split Image Batch 🎥🅥🅗🅢",
