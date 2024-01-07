@@ -364,9 +364,9 @@ class MergeAudio:
             },
         }
 
-    RETURN_TYPES = ("VHS_AUDIO", "STRING")
-    RETURN_NAMES = ("audio", "output_file")
-    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+    RETURN_TYPES = ("VHS_AUDIO", "STRING", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("audio", "output_file", "audio_1_duration", "audio_2_duration", "merged_audio_duration")
+    CATEGORY = "Video Helper Suite 🎥VHS"
     FUNCTION = "merge_audio"
 
     @classmethod
@@ -374,7 +374,7 @@ class MergeAudio:
         # Get the absolute path of the output file
         _datetime = datetime.datetime.now().strftime("%Y%m%d")
         _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
-        
+
         output_file_abs = os.path.abspath(f"audio_{_datetime}.mp3")
 
         # Construct FFmpeg command
@@ -387,8 +387,13 @@ class MergeAudio:
         # Read the merged audio file
         audio = get_audio(output_file_abs)
 
-        # Return the merged audio and output file absolute path as a lambda function
-        return (lambda: audio, output_file_abs)
+        # Get the duration of each audio file and the merged audio file
+        audio_1_duration = get_audio_duration(audio_file_1)
+        audio_2_duration = get_audio_duration(audio_file_2)
+        merged_audio_duration = get_audio_duration(output_file_abs)
+
+        # Return the merged audio, output file absolute path, and durations as a lambda function
+        return (lambda: audio, output_file_abs, audio_1_duration, audio_2_duration, merged_audio_duration)
 
     @classmethod
     def IS_CHANGED(cls, audio_file_1, audio_file_2, output_file_name):
@@ -399,6 +404,29 @@ class MergeAudio:
         if not validate_path(audio_file_1, allow_none=True) or not validate_path(audio_file_2, allow_none=True):
             return False
         return True
+
+def get_audio_duration(audio_file):
+    """
+    Get the duration of an audio file in seconds.
+
+    Args:
+        audio_file: The absolute path to the audio file.
+
+    Returns:
+        The duration of the audio file in seconds.
+    """
+    ffmpeg_cmd = ['ffmpeg', '-i', audio_file]
+    output = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    duration_regex = re.compile(r"Duration: (?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+\.\d+)")
+    match = duration_regex.search(output.stdout.decode('utf-8'))
+    if match:
+        hours = float(match.group('hours'))
+        minutes = float(match.group('minutes'))
+        seconds = float(match.group('seconds'))
+        return hours * 3600 + minutes * 60 + seconds
+    else:
+        raise ValueError("Could not parse audio file duration.")
+
 
 
 NODE_CLASS_MAPPINGS = {
