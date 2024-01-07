@@ -9,7 +9,6 @@ from typing import List
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from pathlib import Path
-import datetime
 
 import folder_paths
 from .logger import logger
@@ -352,6 +351,7 @@ class LoadAudio:
 
 import os
 import subprocess
+import datetime
 
 class MergeAudio:
     @classmethod
