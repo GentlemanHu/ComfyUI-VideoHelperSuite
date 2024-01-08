@@ -536,7 +536,7 @@ class VideoCaptions:
         if is_vertical:
             max_len = 30
 
-        result = captions.getCaptionsWithTime(whisper_analysis, max_caption_size=max_len)
+        result = captions.getCaptionsWithTime(whisper_analysis, maxCaptionSize=max_len)
 
         print(result)
         return result
