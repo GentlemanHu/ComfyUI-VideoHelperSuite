@@ -491,7 +491,7 @@ class VideoCaptions:
 
             if add_subscription_anim:
                 video_editor.addEditingStep(
-                    EditingStep.ADD_SUBSCRIBE_ANIMATION, {"url": AssetDatabase.get_asset_link("subscribe animation")}
+                    EditingStep.ADD_SUBSCRIBE_ANIMATION, {"url": "public/subscribe-animation.mp4"}
                 )
 
             _, vid_length = get_asset_duration(video_path)
