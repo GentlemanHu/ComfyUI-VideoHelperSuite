@@ -469,7 +469,7 @@ class VideoCaptions:
 
     def add_captions(self, video_path, output_filename, audio_path,is_vertical,add_subscription_anim,water_mark,notify_all):
         m_is_vertical = is_vertical  # Set this based on your requirements
-        language = Language.ARABIC  # Set this based on your requirements
+        language = Language.ENGLISH  # Set this based on your requirements
 
         if audio_path is None or audio_path == "" :
             m_audio_path = video_path
