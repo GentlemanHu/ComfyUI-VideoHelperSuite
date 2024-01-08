@@ -455,7 +455,7 @@ class VideoCaptions:
                 "notify_all": ("BOOLEAN",{"default":True})
             },
             "optional": {
-                "audio_path": ("STRING",),
+                "audio_path": ("STRING",{"default":""}),
                 "water_mark": ("STRING",{"default":"OnePieOne"}),    
             },
             "hidden": {},
