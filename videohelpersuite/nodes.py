@@ -448,8 +448,8 @@ class VideoCaptions:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video_path": ("STRING",),
-                "output_filename": ("STRING",),
+                "video_path": ("STRING",{"default": ""}),
+                "output_filename": ("STRING",{"default": "_captioned"}),
                 "is_vertical": ("BOOLEAN",{"default": True}),
                 "add_subscription_anim": ("BOOLEAN",{"default": False}),
                 "notify_all": ("BOOLEAN",{"default":True})
@@ -476,7 +476,10 @@ class VideoCaptions:
         else:
             m_audio_path = audio_path
 
-        output_path = os.path.join(folder_paths.get_output_directory(), output_filename)
+        _datetime = datetime.datetime.now().strftime("%Y%m%d")
+        _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
+
+        output_path = os.path.join(folder_paths.get_output_directory(), output_filename+f"_{_datetime}.mp4")
 
         if not os.path.exists(output_path):
             print("Rendering short: Starting automated editing...")
