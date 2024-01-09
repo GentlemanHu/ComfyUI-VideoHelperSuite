@@ -141,7 +141,7 @@ class VideoCombine:
         extra_pnginfo=None,
         audio=None,
         unique_id=None,
-        manual_format_widgets=None
+        manual_format_widgets=None,
         notify_all=True,
         notify_all_with_meta=True
     ):
