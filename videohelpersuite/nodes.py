@@ -12,7 +12,7 @@ from pathlib import Path
 
 import folder_paths
 from .logger import logger
-from .image_latent_nodes import DuplicateImages, DuplicateLatents, GetImageCount, GetLatentCount, MergeImages, MergeLatents, SelectEveryNthImage, SelectEveryNthLatent, SplitLatents, SplitImages
+from .image_latent_nodes import *
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath
 from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDirectoryPath
 from .batched_nodes import VAEEncodeBatched, VAEDecodeBatched
@@ -52,6 +52,24 @@ def get_video_formats():
         else:
             formats.append("video/" + format_name)
     return formats
+
+def get_format_widget_defaults(format_name):
+    video_format_path = folder_paths.get_full_path("VHS_video_formats", format_name + ".json")
+    with open(video_format_path, 'r') as stream:
+        video_format = json.load(stream)
+    results = {}
+    for w in gen_format_widgets(video_format):
+        if len(w[0]) > 2 and 'default' in w[0][2]:
+            default = w[0][2]['default']
+        else:
+            if type(w[0][1]) is list:
+                default = w[0][1][0]
+            else:
+                #NOTE: This doesn't respect max/min, but should be good enough as a fallback to a fallback to a fallback
+                default = {"BOOLEAN": False, "INT": 0, "FLOAT": 0, "STRING": ""}[w[0][1]]
+        results[w[0][0]] = default
+    return results
+
 
 def apply_format_widgets(format_name, kwargs):
     video_format_path = folder_paths.get_full_path("VHS_video_formats", format_name + ".json")
@@ -123,10 +141,12 @@ class VideoCombine:
         extra_pnginfo=None,
         audio=None,
         unique_id=None,
+        manual_format_widgets=None
         notify_all=True,
         notify_all_with_meta=True
     ):
-        kwargs = prompt[unique_id]['inputs']
+
+
         # convert images to numpy
 
         # get output information
@@ -207,9 +227,24 @@ class VideoCombine:
                 #Should never be reachable
                 raise ProcessLookupError("Could not find ffmpeg")
 
-            video_format_path = folder_paths.get_full_path("VHS_video_formats", format_ext + ".json")
-            with open(video_format_path, 'r') as stream:
-                video_format = json.load(stream)
+            #Acquire additional format_widget values
+            kwargs = None
+            if manual_format_widgets is None:
+                if prompt is not None:
+                    kwargs = prompt[unique_id]['inputs']
+                else:
+                    manual_format_widgets = {}
+            if kwargs is None:
+                kwargs = get_format_widget_defaults(format_ext)
+                missing = {}
+                for k in kwargs.keys():
+                    if k in manual_format_widgets:
+                        kwargs[k] = manual_format_widgets[k]
+                    else:
+                        missing[k] = kwargs[k]
+                if len(missing) > 0:
+                    logger.warn("Extra format values were not provided, the following defaults will be used: " + str(kwargs) + "\nThis is likely due to usage of ComfyUI-to-python. These values can be manually set by supplying a manual_format_widgets argument")
+
             video_format = apply_format_widgets(format_ext, kwargs)
             if video_format.get('input_color_depth', '8bit') == '16bit':
                 images = tensor_to_shorts(images)
@@ -561,14 +596,19 @@ NODE_CLASS_MAPPINGS = {
     # Latent and Image nodes
     "VHS_SplitLatents": SplitLatents,
     "VHS_SplitImages": SplitImages,
+    "VHS_SplitMasks": SplitMasks,
     "VHS_MergeLatents": MergeLatents,
     "VHS_MergeImages": MergeImages,
+    "VHS_MergeMasks": MergeMasks,
     "VHS_SelectEveryNthLatent": SelectEveryNthLatent,
     "VHS_SelectEveryNthImage": SelectEveryNthImage,
+    "VHS_SelectEveryNthMask": SelectEveryNthMask,
     "VHS_GetLatentCount": GetLatentCount,
     "VHS_GetImageCount": GetImageCount,
+    "VHS_GetMaskCount": GetMaskCount,
     "VHS_DuplicateLatents": DuplicateLatents,
     "VHS_DuplicateImages": DuplicateImages,
+    "VHS_DuplicateMasks": DuplicateMasks,
     # Batched Nodes
     "VHS_VAEEncodeBatched": VAEEncodeBatched,
     "VHS_VAEDecodeBatched": VAEDecodeBatched,
@@ -585,14 +625,19 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # Latent and Image nodes
     "VHS_SplitLatents": "Split Latent Batch 🎥🅥🅗🅢",
     "VHS_SplitImages": "Split Image Batch 🎥🅥🅗🅢",
+    "VHS_SplitMasks": "Split Mask Batch 🎥🅥🅗🅢",
     "VHS_MergeLatents": "Merge Latent Batches 🎥🅥🅗🅢",
     "VHS_MergeImages": "Merge Image Batches 🎥🅥🅗🅢",
+    "VHS_MergeMasks": "Merge Mask Batches 🎥🅥🅗🅢",
     "VHS_SelectEveryNthLatent": "Select Every Nth Latent 🎥🅥🅗🅢",
     "VHS_SelectEveryNthImage": "Select Every Nth Image 🎥🅥🅗🅢",
+    "VHS_SelectEveryNthMask": "Select Every Nth Mask 🎥🅥🅗🅢",
     "VHS_GetLatentCount": "Get Latent Count 🎥🅥🅗🅢",
     "VHS_GetImageCount": "Get Image Count 🎥🅥🅗🅢",
+    "VHS_GetMaskCount": "Get Mask Count 🎥🅥🅗🅢",
     "VHS_DuplicateLatents": "Duplicate Latent Batch 🎥🅥🅗🅢",
     "VHS_DuplicateImages": "Duplicate Image Batch 🎥🅥🅗🅢",
+    "VHS_DuplicateMasks": "Duplicate Mask Batch 🎥🅥🅗🅢",
     # Batched Nodes
     "VHS_VAEEncodeBatched": "VAE Encode Batched 🎥🅥🅗🅢",
     "VHS_VAEDecodeBatched": "VAE Decode Batched 🎥🅥🅗🅢",
