@@ -570,7 +570,7 @@ class VideoCaptions:
 
                 #TODO - temp for test, then optimize
                 formated = '{' + caption_json_param.strip() + '}'
-                print(formated)
+                
                 template_dict = json.loads(formated,strict=False)
 
                 # Add the text, start time, and end time to the dictionary
