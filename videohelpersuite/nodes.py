@@ -482,14 +482,12 @@ class VideoCaptions:
     @classmethod
     def INPUT_TYPES(cls):
         default_template_para = """
-            {
-            "fontsize": 100,
-			"font": "Roboto-Bold",
-			"color": "white",
-			"stroke_width": 4,
-			"stroke_color": "black",
-			"method": "caption",   
-            } 
+"fontsize": 100,
+"font": "Roboto-Bold",
+"color": "white",
+"stroke_width": 4,
+"stroke_color": "black",
+"method": "caption"   
 """
 
         return {
