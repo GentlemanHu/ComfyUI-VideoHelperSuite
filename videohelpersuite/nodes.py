@@ -569,7 +569,7 @@ class VideoCaptions:
 
             for (t1, t2), text in timed_captions:
                 string_io = io.StringIO(f"{{caption_json_param}}")
-                template_dict = json.load(string_io)
+                template_dict = json.loads(string_io)
 
                 # Add the text, start time, and end time to the dictionary
                 template_dict["text"] = text.upper()
