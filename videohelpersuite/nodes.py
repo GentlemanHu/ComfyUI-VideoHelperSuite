@@ -470,7 +470,7 @@ def get_audio_duration(audio_file):
 
 
 
-import os
+import os,io
 from shortGPT.audio import audio_utils
 from shortGPT.audio.audio_duration import get_asset_duration
 from shortGPT.config.asset_db import AssetDatabase
@@ -481,6 +481,17 @@ from shortGPT.editing_utils import captions
 class VideoCaptions:
     @classmethod
     def INPUT_TYPES(cls):
+        default_template_para = """
+            {
+            "fontsize": 100,
+			"font": "Roboto-Bold",
+			"color": "white",
+			"stroke_width": 4,
+			"stroke_color": "black",
+			"method": "caption",   
+            } 
+"""
+
         return {
             "required": {
                 "video_path": ("STRING",{"default": ""}),
@@ -491,7 +502,8 @@ class VideoCaptions:
             },
             "optional": {
                 "audio_path": ("STRING",{"default":""}),
-                "water_mark": ("STRING",{"default":"OnePieOne"}),    
+                "water_mark": ("STRING",{"default":"OnePieOne"}),
+                "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True})    
             },
             "hidden": {},
         }
@@ -502,7 +514,7 @@ class VideoCaptions:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "add_captions"
 
-    def add_captions(self, video_path, output_filename, audio_path,is_vertical,add_subscription_anim,water_mark,notify_all):
+    def add_captions(self, video_path, output_filename, audio_path,is_vertical,add_subscription_anim,water_mark,notify_all,caption_json_param):
         m_is_vertical = is_vertical  # Set this based on your requirements
         # TODO - select by user from node
         language = Language.ENGLISH  # Set this based on your requirements
@@ -554,9 +566,16 @@ class VideoCaptions:
                 )
 
             for (t1, t2), text in timed_captions:
+                string_io = io.StringIO(caption_json_param)
+                template_dict = json.load(string_io)
+
+                # Add the text, start time, and end time to the dictionary
+                template_dict["text"] = text.upper()
+                template_dict["set_time_start"] = t1
+                template_dict["set_time_end"] = t2
                 video_editor.addEditingStep(
                     caption_type,
-                    {"text": text.upper(), "set_time_start": t1, "set_time_end": t2},
+                    template_dict,
                 )
 
             video_editor.renderVideo(output_path, None)
