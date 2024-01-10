@@ -532,6 +532,8 @@ class VideoCaptions:
         if not os.path.exists(output_path):
             print("Rendering short: Starting automated editing...")
 
+            print(f"Caption Param --- {caption_json_param}")
+
             timed_captions = self._time_captions(m_audio_path, m_is_vertical)
 
             video_editor = EditingEngine()
