@@ -628,7 +628,8 @@ class VideoGentleCaptions:
 'highlight_color': 'white',
 'karaoke': False,
 'vad': True,
-'word_level': True
+'word_level': True,
+'segment_level': True
 """
 
         return {
