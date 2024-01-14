@@ -110,14 +110,15 @@ class GentleCaption:
         if bg_audio_path is None or bg_audio_path == "":
             bg_audio_path = bg_video_path
             
-
+        print(bg_audio_path)
+        
         ass_path = self.srt_create(self.model,extra_para,path=self.output_dir,filename=bg_audio_path)
         m_type ='audio' if bg_video_path != bg_audio_path  else 'video'
         audio_info = self.get_info(bg_audio_path,m_type)
         audio_duration = int(round(audio_info.get('duration'), 0))
         
-        
-        ss = random.randint(0, (video_duration-audio_duration))
+        print(f"video_duration {video_duration} ---- audio_duration {audio_duration}")
+        ss = random.randint(0, abs(video_duration-audio_duration))
         audio_duration = self.convert_time(audio_duration)
         
         
