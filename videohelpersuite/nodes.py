@@ -604,6 +604,95 @@ class VideoCaptions:
 
 
 
+from .caption import GentleCaption
+import ast
+class VideoGentleCaptions:
+    def __init__(self) -> None:
+        self.cp = GentleCaption()
+        pass
+    
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        default_template_para = """
+'Fontname': 'Lemon-Regular',
+'Alignment': 5,
+'BorderStyle': '1',
+'Outline': '1',
+'Shadow': '2',
+'Blur': '21',
+'Fontsize': 22,
+'MarginL': '0',
+'MarginR': '0',
+'tag': -1,
+'highlight_color': 'white',
+'karaoke': False,
+'vad': True,
+'word_level': True
+"""
+
+        return {
+            "required": {
+                "video_path": ("STRING",{"default": ""}),
+                "output_filename": ("STRING",{"default": "_captioned"}),
+                "is_vertical": ("BOOLEAN",{"default": True}),
+                "notify_all": ("BOOLEAN",{"default":True})
+            },
+            "optional": {
+                "audio_path": ("STRING",{"default":""}),
+                "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True})    
+            },
+            "hidden": {},
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("Video Path",)
+    OUTPUT_NODE = True
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+    FUNCTION = "add_gentle_captions"
+
+    def add_gentle_captions(self, video_path, output_filename, audio_path,is_vertical,notify_all,caption_json_param):
+        
+        
+        # 删除换行符和缩进 TODO - 手动拼接 ，不知道如何转dict，临时使用
+        para = caption_json_param.replace('\n', '')
+        para = para.replace(' ', '')
+        para = "{"+para+"}"
+        video_result =  self.cp.makeVideo(bg_video_path=video_path,bg_audio_path=audio_path,output_filename=output_filename,extra_para=dict(eval(para)))
+
+        if notify_all:
+            notifyAll(video_result, "====Caption====")
+        return {"ui": {"video": [{"filename": output_filename, "subfolder": "", "type": "output"}]}, "result": (video_result,)}
+
+
+def string_to_dict(string):
+  """
+  将一个字符串转换为字典
+
+  Args:
+    string: 要转换的字符串
+
+  Returns:
+    一个字典
+  """
+
+  # 将字符串拆分为键值对列表
+  key_value_pairs = string.split(',')
+
+  # 创建一个字典
+  d = {}
+
+  # 遍历键值对列表
+  for key_value_pair in key_value_pairs:
+    # 将键值对拆分为键和值
+    key, value = key_value_pair.split(':')
+
+    # 将键和值添加到字典中
+    d[key] = value
+
+  # 返回字典
+  return d
+
 
 
 
@@ -618,6 +707,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_LoadAudio": LoadAudio,
     "VHS_MergeAudio": MergeAudio,
     "VHS_VideoCaptions": VideoCaptions,
+    "VHS_VideoGentleCaptions": VideoGentleCaptions,
     # Latent and Image nodes
     "VHS_SplitLatents": SplitLatents,
     "VHS_SplitImages": SplitImages,
@@ -647,6 +737,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_LoadAudio": "Load Audio (Path)🎥🅥🅗🅢",
     "VHS_MergeAudio": "Merge Audio 🎥🅥🅗🅢",
     "VHS_VideoCaptions": "Video Captions 🎥🅥🅗🅢",
+    "VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢",
     # Latent and Image nodes
     "VHS_SplitLatents": "Split Latent Batch 🎥🅥🅗🅢",
     "VHS_SplitImages": "Split Image Batch 🎥🅥🅗🅢",
