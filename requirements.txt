@@ -2,3 +2,4 @@ opencv-python
 imageio-ffmpeg
 git+https://github.com/GentlemanHu/ShortGPT.git@stable
 git+https://github.com/jianfch/stable-ts.git
+git+https://github.com/rezoo/movis.git
