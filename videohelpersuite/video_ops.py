@@ -12,6 +12,13 @@ m_output_folder = folder_paths.get_output_directory()
 
 
 
+def scale_to_cover(target_size, current_size):
+    tw, th = target_size
+    cw, ch = current_size
+    width_ratio = tw / cw
+    height_ratio = th / ch
+    return max(width_ratio, height_ratio)
+
 def tensor_to_int(tensor, bits):
     #TODO: investigate benefit of rounding by adding 0.5 before clip/cast
     tensor = tensor.cpu().numpy() * (2**bits-1)
@@ -106,20 +113,20 @@ class CompositeMedia:
         timeline = pd.DataFrame([
             {
                 'duration': mv.layer.media.Audio(audio_1).duration, 'image': f'{image_1_path}',
-                'title': '', 'title_position': 'center'},
+                'title': '', 'title_position': 'center','audio': audio_1},
             {
                 'duration': mv.layer.media.Audio(audio_2).duration, 'image': f'{image_2_path}',
-                'title': '', 'title_position': 'bottom_right'},
+                'title': '', 'title_position': 'bottom_right','audio': audio_2},
             {
                 'duration': mv.layer.media.Audio(audio_3).duration, 'image': f'{image_3_path}',
-                'title': '', 'title_position': 'bottom_right'},
+                'title': '', 'title_position': 'bottom_right','audio': audio_3},
                     {
                 'duration': mv.layer.media.Audio(audio_4).duration, 'image': f'{image_4_path}',
-                'title': '', 'title_position': 'bottom_right'}
+                'title': '', 'title_position': 'bottom_right','audio': audio_4}
         ])
-        transitions = [2.0, 2.0]
+        transitions = [1.0, 1.0]
 
-        total_time = timeline['duration'].sum() + sum(transitions) + 1.0
+        total_time = timeline['duration'].sum() + sum(transitions)
         print(f"total time {total_time}")
         scene = mv.layer.Composition(size=size, duration=total_time)
         scene.add_layer(mv.layer.Rectangle(size=size, color='#202020', duration=scene.duration), name='bg')
@@ -130,8 +137,10 @@ class CompositeMedia:
         next_transitions = transitions + [0.]
         for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
             T = row['duration']
-            image = scene.add_layer(
-                mv.layer.Image(row['image'], duration=T + t_prev + t_next), offset=time - t_prev)
+            image_layer = mv.layer.Image(row['image'], duration=T + t_prev + t_next)
+            image = scene.add_layer(image_layer, offset=time - t_prev,scale=scale_to_cover(size,image_layer.size))
+            
+            scene.add_layer(mv.layer.media.Audio(row['audio']),start_time=time - t_prev)
             if i == 0:
                 # Add fadein effect
                 image.opacity.enable_motion().extend(keyframes=[0.0, 1.0], values=[0.0, 1.0])
