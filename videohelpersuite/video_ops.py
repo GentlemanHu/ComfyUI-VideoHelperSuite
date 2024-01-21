@@ -120,7 +120,7 @@ class CompositeMedia:
             {
                 'duration': mv.layer.media.Audio(audio_3).duration, 'image': f'{image_3_path}',
                 'title': '', 'title_position': 'bottom_right','audio': audio_3},
-                    {
+            {
                 'duration': mv.layer.media.Audio(audio_4).duration, 'image': f'{image_4_path}',
                 'title': '', 'title_position': 'bottom_right','audio': audio_4}
         ])
