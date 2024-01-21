@@ -112,19 +112,19 @@ class CompositeMedia:
         size =  (1080,1920) if is_vertical else (1920, 1080) 
         timeline = pd.DataFrame([
             {
-                'duration': mv.layer.media.Audio(audio_1).duration+1.0, 'image': f'{image_1_path}',
+                'duration': mv.layer.media.Audio(audio_1).duration, 'image': f'{image_1_path}',
                 'title': '', 'title_position': 'center','audio': audio_1},
             {
-                'duration': mv.layer.media.Audio(audio_2).duration+1.0, 'image': f'{image_2_path}',
+                'duration': mv.layer.media.Audio(audio_2).duration, 'image': f'{image_2_path}',
                 'title': '', 'title_position': 'bottom_right','audio': audio_2},
             {
-                'duration': mv.layer.media.Audio(audio_3).duration+1.0, 'image': f'{image_3_path}',
+                'duration': mv.layer.media.Audio(audio_3).duration, 'image': f'{image_3_path}',
                 'title': '', 'title_position': 'bottom_right','audio': audio_3},
                     {
-                'duration': mv.layer.media.Audio(audio_4).duration+1.0, 'image': f'{image_4_path}',
+                'duration': mv.layer.media.Audio(audio_4).duration, 'image': f'{image_4_path}',
                 'title': '', 'title_position': 'bottom_right','audio': audio_4}
         ])
-        transitions = [1.0, 1.0]
+        transitions = [0.3, 0.3]
 
         total_time = timeline['duration'].sum() + sum(transitions)
         print(f"total time {total_time}")
@@ -138,16 +138,16 @@ class CompositeMedia:
         for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
             T = row['duration']
             image_layer = mv.layer.Image(row['image'], duration=T + t_prev + t_next)
-            image = scene.add_layer(image_layer, offset=time - t_prev,scale=scale_to_cover(size,image_layer.size)*1.2)
+            image = scene.add_layer(image_layer, offset=time - t_prev,scale=scale_to_cover(size,image_layer.size)*2)
             
             scene.add_layer(mv.layer.media.Audio(row['audio']),offset=time - t_prev)
             if i == 0:
                 # Add fadein effect
-                image.opacity.enable_motion().extend(keyframes=[0.0, 1.0], values=[0.0, 1.0])
+                image.opacity.enable_motion().extend(keyframes=[0.0, 0.5], values=[0.0, 1.0])
             elif i == len(timeline) - 1:
                 # Add fadeout effect
                 t = image.duration
-                image.opacity.enable_motion().extend(keyframes=[t - 1.0, t], values=[1.0, 0.0])
+                image.opacity.enable_motion().extend(keyframes=[t - 0.5, t], values=[1.0, 0.0])
 
             # kwargs_dict = {
             #     'center': {'position': (size[0] / 2, size[1] / 2), 'origin_point': mv.Direction.CENTER},
