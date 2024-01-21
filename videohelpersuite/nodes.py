@@ -17,6 +17,7 @@ from .load_video_nodes import LoadVideoUpload, LoadVideoPath
 from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDirectoryPath
 from .batched_nodes import VAEEncodeBatched, VAEDecodeBatched
 from .utils import ffmpeg_path, get_audio, hash_path, validate_path
+from .video_ops import *
 
 folder_paths.folder_names_and_paths["VHS_video_formats"] = (
     [
@@ -746,6 +747,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_VideoCaptions": VideoCaptions,
     "VHS_VideoGentleCaptions": VideoGentleCaptions,
     "VHS_PruneOutputs": PruneOutputs,
+    "VHS_MOVIS_COMPOSITE": CompositeMedia,
     # Latent and Image nodes
     "VHS_SplitLatents": SplitLatents,
     "VHS_SplitImages": SplitImages,
@@ -777,6 +779,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoCaptions": "Video Captions 🎥🅥🅗🅢",
     "VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢",
     "VHS_PruneOutputs": "Prune Outputs 🎥🅥🅗🅢",
+    "VHS_MOVIS_COMPOSITE": "Movis Composite 🎥🅥🅗🅢",
     # Latent and Image nodes
     "VHS_SplitLatents": "Split Latent Batch 🎥🅥🅗🅢",
     "VHS_SplitImages": "Split Image Batch 🎥🅥🅗🅢",
