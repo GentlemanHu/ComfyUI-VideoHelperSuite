@@ -109,7 +109,7 @@ class CompositeMedia:
             compress_level=4,
         )
         
-        size =  (1080,1920) if is_vertical else (1920, 1080) 
+        size =  mv.layer.Image(image_1_path).size
         timeline = pd.DataFrame([
             {
                 'duration': mv.layer.media.Audio(audio_1).duration, 'image': f'{image_1_path}',
@@ -124,9 +124,9 @@ class CompositeMedia:
                 'duration': mv.layer.media.Audio(audio_4).duration, 'image': f'{image_4_path}',
                 'title': '', 'title_position': 'bottom_right','audio': audio_4}
         ])
-        transitions = [0.3, 0.3]
+        transitions = [0.5, 0.5,0.5]
 
-        total_time = timeline['duration'].sum() + sum(transitions)
+        total_time = timeline['duration'].sum() + sum(transitions) +1
         print(f"total time {total_time}")
         scene = mv.layer.Composition(size=size, duration=total_time)
         scene.add_layer(mv.layer.Rectangle(size=size, color='#202020', duration=scene.duration), name='bg')
@@ -138,7 +138,7 @@ class CompositeMedia:
         for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
             T = row['duration']
             image_layer = mv.layer.Image(row['image'], duration=T + t_prev + t_next)
-            image = scene.add_layer(image_layer, offset=time - t_prev,scale=scale_to_cover(size,image_layer.size)*2)
+            image = scene.add_layer(image_layer, offset=time - t_prev)
             
             scene.add_layer(mv.layer.media.Audio(row['audio']),offset=time - t_prev)
             if i == 0:
