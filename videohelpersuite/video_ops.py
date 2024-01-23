@@ -60,13 +60,19 @@ class CompositeMedia:
         _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
 
         image_paths = []
-        for i, image in enumerate(images):
-            image_path = os.path.join(m_output_folder, "composite_img" + "_" + str(i + 1) + "_" + _datetime + ".png")
-            Image.fromarray(tensor_to_bytes(image[0])).save(
-                image_path,
-                compress_level=4,
-            )
-            image_paths.append(image_path)
+        filename = f"composite_media_{_datetime}"
+        
+        for image in images:
+            i = 255. * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            metadata = None
+
+            file = f"{filename}_{counter:05}_.png"
+            file_path = os.path.join(folder_paths.get_output_directory(), file)
+            img.savef(file_path,compress_level=4)
+
+            image_paths.append(file_path)
+            counter += 1
         
         audio_paths = audios.split(",")
 
