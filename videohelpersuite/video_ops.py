@@ -70,10 +70,13 @@ class CompositeMedia:
         
         audio_paths = audios.split(",")
 
+        print(audio_paths)
+        print("=======")
+        print(image_paths)
         # TODO -不一定音频需要
         # Ensure that the number of images and audios match
-        if len(image_paths) != len(audio_paths):
-            raise ValueError("The number of images and audios must be the same.")
+        # if len(image_paths) != len(audio_paths):
+        #     raise ValueError("The number of images and audios must be the same.")
 
         size = mv.layer.Image(image_paths[0]).size
         timeline = pd.DataFrame()
