@@ -69,7 +69,7 @@ class CompositeMedia:
 
             file = f"{filename}_{counter:05}_.png"
             file_path = os.path.join(folder_paths.get_output_directory(), file)
-            img.savef(file_path,compress_level=4)
+            img.save(file_path,compress_level=4)
 
             image_paths.append(file_path)
             counter += 1
