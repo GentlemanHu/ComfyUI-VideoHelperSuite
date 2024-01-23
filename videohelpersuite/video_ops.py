@@ -61,7 +61,7 @@ class CompositeMedia:
 
         image_paths = []
         filename = f"composite_media_{_datetime}"
-        
+        counter = 0
         for image in images:
             i = 255. * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
