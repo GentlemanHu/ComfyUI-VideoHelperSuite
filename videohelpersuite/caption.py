@@ -13,7 +13,7 @@ import folder_paths
 
 import stable_whisper as whisper
 
-
+global probe
 
 class GentleCaption:
     def __init__(self) -> None:
@@ -49,7 +49,6 @@ class GentleCaption:
 
 
     def get_info(self,filename: str, kind: str):
-        global probe
 
         try:
             probe = ffmpeg.probe(filename)
