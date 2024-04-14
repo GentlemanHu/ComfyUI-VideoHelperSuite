@@ -49,7 +49,8 @@ class GentleCaption:
 
 
     def get_info(self,filename: str, kind: str):
-
+        global probe
+        
         try:
             probe = ffmpeg.probe(filename)
         except:
