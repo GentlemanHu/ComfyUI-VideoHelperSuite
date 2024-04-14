@@ -48,42 +48,28 @@ class GentleCaption:
         return ass_filename
 
 
-    def get_info(self,filename: str, kind: str):
-        global probe
-        
-        try:
-            probe = ffmpeg.probe(filename)
-        except:
-            pass
+
+    def get_info(filename: str, kind: str):
 
         if kind == 'video':
-            global video_stream
-
-            # Extract
-            for stream in probe['streams']:
-                if stream['codec_type'] == 'video':
-                    video_stream = stream
-                    break
-
-            duration = float(video_stream['duration'])
-            width = int(video_stream['width'])
-            height = int(video_stream['height'])
-
-            return {'width': width, 'height': height, 'duration': duration}
+            result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=width,height,duration', '-of', 'csv=p=0', filename], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                raise RuntimeError(f"Error getting video info: {result.stderr.decode('utf-8')}")
+            width, height, duration = result.stdout.decode('utf-8').split(',')
+            return {'width': int(width), 'height': int(height), 'duration': float(duration)}
 
         elif kind == 'audio':
-            global audio_stream
+            result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=duration', '-of', 'csv=p=0', filename], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                raise RuntimeError(f"Error getting audio info: {result.stderr.decode('utf-8')}")
+            duration = result.stdout.decode('utf-8')
+            return {'duration': float(duration)}
 
-            # Extract
-            for stream in probe['streams']:
-                if stream['codec_type'] == 'audio':
-                    audio_stream = stream
-                    break
+        else:
+            raise ValueError(f"Invalid kind: {kind}")
+            
 
-            duration = float(audio_stream['duration'])
 
-            return {'duration': duration}
-        
     def convert_time(self,time_in_seconds):
         """
         Converts time in seconds to a string in the format "hh:mm:ss.mmm".
