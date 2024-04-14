@@ -49,7 +49,7 @@ class GentleCaption:
 
 
 
-    def get_info(filename: str, kind: str):
+    def get_info(self,filename: str, kind: str):
 
         if kind == 'video':
             result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=width,height,duration', '-of', 'csv=p=0', filename], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
