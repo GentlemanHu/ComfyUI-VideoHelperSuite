@@ -17,7 +17,7 @@ from .image_latent_nodes import *
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath
 from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDirectoryPath
 from .batched_nodes import VAEEncodeBatched, VAEDecodeBatched
-from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, gifski_path
+from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, gifski_path, calculate_file_hash
 from .video_ops import *
 
 folder_paths.folder_names_and_paths["VHS_video_formats"] = (
@@ -26,6 +26,7 @@ folder_paths.folder_names_and_paths["VHS_video_formats"] = (
     ],
     [".json"]
 )
+audio_extensions = ['mp3', 'mp4', 'wav', 'ogg']
 
 def gen_format_widgets(video_format):
     for k in video_format:
@@ -480,6 +481,48 @@ class LoadAudio:
 
     @classmethod
     def VALIDATE_INPUTS(s, audio_file, **kwargs):
+        return validate_path(audio_file, allow_none=True)
+
+class LoadAudioUpload:
+    @classmethod
+    def INPUT_TYPES(s):
+        input_dir = folder_paths.get_input_directory()
+        files = []
+        for f in os.listdir(input_dir):
+            if os.path.isfile(os.path.join(input_dir, f)):
+                file_parts = f.split('.')
+                if len(file_parts) > 1 and (file_parts[-1] in audio_extensions):
+                    files.append(f)
+        return {"required": {
+                    "audio": (sorted(files),),
+                    "start_time": ("FLOAT" , {"default": 0, "min": 0, "max": 10000000, "step": 0.01}),
+                    "duration": ("FLOAT" , {"default": 0, "min": 0, "max": 10000000, "step": 0.01}),
+                     },
+                }
+
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+
+    RETURN_TYPES = ("VHS_AUDIO", )
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "load_audio"
+
+    def load_audio(self, start_time, duration, **kwargs):
+        audio_file = folder_paths.get_annotated_filepath(kwargs['audio'].strip("\""))
+        if audio_file is None or validate_path(audio_file) != True:
+            raise Exception("audio_file is not a valid path: " + audio_file)
+        
+        audio = get_audio(audio_file, start_time, duration)
+
+        return (lambda : audio,)
+
+    @classmethod
+    def IS_CHANGED(s, audio, start_time, duration):
+        audio_file = folder_paths.get_annotated_filepath(audio.strip("\""))
+        return hash_path(audio_file)
+
+    @classmethod
+    def VALIDATE_INPUTS(s, audio, **kwargs):
+        audio_file = folder_paths.get_annotated_filepath(audio.strip("\""))
         return validate_path(audio_file, allow_none=True)
 
 class PruneOutputs:
@@ -995,6 +1038,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_LoadImages": LoadImagesFromDirectoryUpload,
     "VHS_LoadImagesPath": LoadImagesFromDirectoryPath,
     "VHS_LoadAudio": LoadAudio,
+    "VHS_LoadAudioUpload": LoadAudioUpload,
     "VHS_MergeAudio": MergeAudio,
     "VHS_VideoCaptions": VideoCaptions,
     "VHS_VideoGentleCaptions": VideoGentleCaptions,
@@ -1031,6 +1075,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_LoadImages": "Load Images (Upload) 🎥🅥🅗🅢",
     "VHS_LoadImagesPath": "Load Images (Path) 🎥🅥🅗🅢",
     "VHS_LoadAudio": "Load Audio (Path)🎥🅥🅗🅢",
+    "VHS_LoadAudioUpload": "Load Audio (Upload)🎥🅥🅗🅢",
     "VHS_MergeAudio": "Merge Audio 🎥🅥🅗🅢",
     "VHS_VideoCaptions": "Video Captions 🎥🅥🅗🅢",
     "VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢",
