@@ -995,7 +995,17 @@ class VideoGentleCaptions:
 
         if notify_all:
             notifyAll(video_result, "====Caption====")
-        return {"ui": {"video": [{"filename": output_filename, "subfolder": "", "type": "output"}]}, "result": (video_result,)}
+        
+        previews = [
+            {
+                "filename": output_filename,
+                "subfolder": "",
+                "type": "output",
+                "format": "video/h264-mp4",
+            }
+        ]
+        # return {"ui": {}, "result": ((save_output, output_files),os.path.join(full_output_folder, file))}
+        return {"ui": {"gifs": previews, "video": [{"filename": output_filename, "subfolder": "", "type": "output"}]}, "result": (video_result,os.path.join(folder_paths.get_output_directory(), output_filename))}
 
 
 def string_to_dict(string):
