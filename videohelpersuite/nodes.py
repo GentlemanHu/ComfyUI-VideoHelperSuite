@@ -991,21 +991,21 @@ class VideoGentleCaptions:
         para = caption_json_param.replace('\n', '')
         para = para.replace(' ', '')
         para = "{"+para+"}"
-        video_result =  self.cp.makeVideo(bg_video_path=video_path,bg_audio_path=audio_path,output_filename=output_filename,extra_para=dict(eval(para)))
+        real_filename, video_result =  self.cp.makeVideo(bg_video_path=video_path,bg_audio_path=audio_path,output_filename=output_filename,extra_para=dict(eval(para)))
 
         if notify_all:
             notifyAll(video_result, "====Caption====")
         
         previews = [
             {
-                "filename": output_filename,
+                "filename": real_filename,
                 "subfolder": "",
                 "type": "output",
                 "format": "video/h264-mp4",
             }
         ]
         # return {"ui": {}, "result": ((save_output, output_files),os.path.join(full_output_folder, file))}
-        return {"ui": {"gifs": previews, "video": [{"filename": output_filename, "subfolder": "", "type": "output"}]}, "result": (video_result,os.path.join(folder_paths.get_output_directory(), output_filename))}
+        return {"ui": {"gifs": previews, "video": [{"filename": real_filename, "subfolder": "", "type": "output"}]}, "result": (video_result,os.path.join(folder_paths.get_output_directory(), real_filename))}
 
 
 def string_to_dict(string):
