@@ -835,7 +835,8 @@ class VideoCaptions:
             "optional": {
                 "audio_path": ("STRING",{"default":""}),
                 "water_mark": ("STRING",{"default":"OnePieOne"}),
-                "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True})    
+                "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True}),
+                "notify_message": ("STRING",{"default":"====Caption===="})       
             },
             "hidden": {},
         }
@@ -846,7 +847,7 @@ class VideoCaptions:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "add_captions"
 
-    def add_captions(self, video_path, output_filename, audio_path,is_vertical,add_subscription_anim,water_mark,notify_all,caption_json_param):
+    def add_captions(self, video_path, output_filename, audio_path,is_vertical,add_subscription_anim,water_mark,notify_all,caption_json_param,notify_message):
         m_is_vertical = is_vertical  # Set this based on your requirements
         # TODO - select by user from node
         language = Language.ENGLISH  # Set this based on your requirements
@@ -919,7 +920,7 @@ class VideoCaptions:
             video_editor.renderVideo(output_path, None)
 
         if notify_all:
-            notifyAll(output_path, "====Caption====")
+            notifyAll(output_path, f"{notify_message}")
         return {"ui": {"video": [{"filename": output_filename, "subfolder": "", "type": "output"}]}, "result": (output_path,)}
 
     def _time_captions(self, audio_path, is_vertical=True):
@@ -973,7 +974,8 @@ class VideoGentleCaptions:
             },
             "optional": {
                 "audio_path": ("STRING",{"default":""}),
-                "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True})    
+                "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True}),
+                "notify_message": ("STRING",{"default":"====Caption===="})   
             },
             "hidden": {},
         }
@@ -984,7 +986,7 @@ class VideoGentleCaptions:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "add_gentle_captions"
 
-    def add_gentle_captions(self, video_path, output_filename, audio_path,is_vertical,notify_all,caption_json_param):
+    def add_gentle_captions(self, video_path, output_filename, audio_path,is_vertical,notify_all,caption_json_param,notify_message):
         
         
         # 删除换行符和缩进 TODO - 手动拼接 ，不知道如何转dict，临时使用
@@ -994,7 +996,7 @@ class VideoGentleCaptions:
         real_filename, video_result =  self.cp.makeVideo(bg_video_path=video_path,bg_audio_path=audio_path,output_filename=output_filename,extra_para=dict(eval(para)))
 
         if notify_all:
-            notifyAll(video_result, "====Caption====")
+            notifyAll(video_result, f"{notify_message}")
         
         previews = [
             {
