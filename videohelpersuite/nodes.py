@@ -7,6 +7,7 @@ import numpy as np
 import re
 import datetime
 from typing import List
+import torch
 from PIL import Image, ExifTags
 from PIL.PngImagePlugin import PngInfo
 from pathlib import Path
@@ -213,6 +214,10 @@ class VideoCombine:
         notify_all=True,
         notify_all_with_meta=False
     ):
+
+        if isinstance(images, torch.Tensor) and images.size(0) == 0:
+            return ("",)
+
         # get output information
         output_dir = (
             folder_paths.get_output_directory()
