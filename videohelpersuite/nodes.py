@@ -1065,6 +1065,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_VideoInfoSource": VideoInfoSource,
     "VHS_VideoInfoLoaded": VideoInfoLoaded,
     "VHS_MOVIS_COMPOSITE": CompositeMedia,
+    "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
     # Latent and Image nodes
     "VHS_SplitLatents": SplitLatents,
     "VHS_SplitImages": SplitImages,
@@ -1102,6 +1103,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoInfoSource": "Video Info (Source) 🎥🅥🅗🅢",
     "VHS_VideoInfoLoaded": "Video Info (Loaded) 🎥🅥🅗🅢",
     "VHS_MOVIS_COMPOSITE": "Movis Composite 🎥🅥🅗🅢",
+    "VHS_MOVIS_MultiVideo": "Movis Multi-Video 🎥🅥🅗🅢",
     # Latent and Image nodes
     "VHS_SplitLatents": "Split Latent Batch 🎥🅥🅗🅢",
     "VHS_SplitImages": "Split Image Batch 🎥🅥🅗🅢",

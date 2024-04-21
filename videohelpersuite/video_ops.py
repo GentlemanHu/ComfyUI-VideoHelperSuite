@@ -198,3 +198,145 @@ class CompositeMedia:
             
 #         return {"ui":{"video_path":file_pth},"result": (file_pth,)}
     
+class CompositeMultiVideo:
+    @classmethod
+    def INPUT_TYPES(self):
+        return {
+            "required": {
+                "videos": ("STRING", {"validate": "is_file"},),
+                "audios": ("STRING", {"validate": "is_file"},),
+                "is_vertical":("BOOLEAN",{"default":True}),
+                "output_file_prefix": ("STRING", {"default": "composite_multi_video_output_"}),
+                "notify_all": ("BOOLEAN",{"default":True})
+            },
+            "optional": {
+                "bgm": ("STRING",{"default":""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("video_file_path",)
+    CATEGORY = "Video Helper Suite 🎥VHS"
+    FUNCTION = "composite_videos"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def composite_videos(self, videos, audios, bgm, is_vertical, output_file_prefix, notify_all):
+        
+        _datetime = datetime.datetime.now().strftime("%Y%m%d")
+        _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
+
+        video_paths = videos.split(",")
+
+        audio_paths = audios.split(",")
+
+        print(audio_paths)
+        print("=======")
+        print(video_paths)
+        # TODO -不一定音频需要
+        # Ensure that the number of images and audios match
+        # if len(video_paths) != len(audio_paths):
+        #     raise ValueError("The number of images and audios must be the same.")
+
+        size = mv.layer.Video(video_paths[0]).size
+        timeline = pd.DataFrame()
+        for i, (image_path, audio_path) in enumerate(zip(video_paths, audio_paths)):
+            timeline = timeline.append({
+                'duration': mv.layer.media.Audio(audio_path).duration, 'video': f'{image_path}',
+                'title': '', 'title_position': 'center','audio': audio_path}, ignore_index=True)
+
+        # Create transitions list with 0.5 for each transition
+        transitions = [0.5] * (len(video_paths) - 1)
+        
+        total_time = timeline['duration'].sum() + sum(transitions) +1
+        print(f"total time {total_time}")
+        scene = mv.layer.Composition(size=size, duration=total_time)
+        scene.add_layer(mv.layer.Rectangle(size=size, color='#202020', duration=scene.duration), name='bg')
+
+        print("----scene-----")
+        time = 0.
+        prev_transitions = [0.] + transitions
+        next_transitions = transitions + [0.]
+        for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
+            T = row['duration']
+            video_layer = mv.layer.Video(row['video'])
+            
+            video_duration = video_layer.duration
+            video_full_duration = video_duration + time
+            required_duration = T + t_prev + t_next
+            
+            remaining_duration = required_duration - video_duration + 1
+            
+    
+            if remaining_duration > 0:
+                # Loop and add the same video layer until the required duration is met
+                image = scene.add_layer(video_layer, offset=time - t_prev)
+                
+                last_end_time = time - t_prev
+                layer_start_time = last_end_time + video_duration
+                
+                num_loops = int(required_duration // video_duration) 
+                #至少为1次
+                if num_loops -1 == 0:
+                    image = scene.add_layer(video_layer, offset=layer_start_time,end_time=remaining_duration)
+                else:
+                    for m in range(num_loops-1):
+                        layer_start_time = last_end_time + video_duration
+                        layer_end_time = video_duration 
+                        image = scene.add_layer(video_layer, offset=layer_start_time, end_time=layer_end_time)
+                        last_end_time = layer_start_time + layer_end_time
+                        if num_loops-2 == m:
+                            image = scene.add_layer(video_layer, offset=last_end_time + video_duration, end_time=remaining_duration-(num_loops-1)*video_duration)
+            else:
+                image = scene.add_layer(video_layer, offset=time - t_prev,end_time=required_duration)
+            
+        
+        
+            if row['audio'] != "":
+                scene.add_layer(mv.layer.media.Audio(row['audio']),offset=time - t_prev)
+
+            if i == 0:
+                # Add fadein effect
+                image.opacity.enable_motion().extend(keyframes=[0.0, 0.5], values=[0.0, 1.0])
+            elif i == len(timeline) - 1:
+                # Add fadeout effect
+                t = image.duration
+                image.opacity.enable_motion().extend(keyframes=[t - 0.5, t], values=[1.0, 0.0])
+
+            # kwargs_dict = {
+            #     'center': {'position': (size[0] / 2, size[1] / 2), 'origin_point': mv.Direction.CENTER},
+            # #     'bottom_right': {'position': (size[0] - 50, size[1] - 50), 'origin_point': mv.Direction.BOTTOM_RIGHT}}
+            # position = kwargs_dict[row['title_position']]['position']
+            # origin_point = kwargs_dict[row['title_position']]['origin_point']
+            # scene.add_layer(
+            #     make_logo(row['title'], duration=T, font_size=64),
+            #     offset=time, position=position, origin_point=origin_point)
+
+            if 0 < i:
+                # Add fade effects
+                image.opacity.enable_motion().extend(keyframes=[0.0, t_prev], values=[0.0, 1.0])
+
+            # # Add scale effect
+            # values = [1.15, 1.25] if i % 2 == 0 else [1.25, 1.15]
+            # image.scale.enable_motion().extend(
+            #     keyframes=[0.0, T + t_prev + t_next], values=values)
+            time += (T + t_next)
+            
+        # Get the absolute path of the output file
+        _datetime = datetime.datetime.now().strftime("%Y%m%d")
+        _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
+        
+        
+        file_name = output_file_prefix + _datetime +".mp4"
+        file_pth = os.path.join(folder_paths.get_output_directory(),file_name)
+    
+        if bgm != "":
+            scene.add_layer(mv.layer.media.Audio(bgm),start_time=0,end_time=scene.duration)
+            
+        scene.write_video(file_pth)
+
+        if notify_all:
+            notify.notifyAll(file_pth,"video_composite")
+            
+        return {"ui":{"video_path":file_pth},"result": (file_pth,)}
+    
