@@ -33,6 +33,7 @@ class DepthFlowGenerator:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Video Result Path",)
     OUTPUT_NODE = True
+    FUNCTION = "run_depthflow"
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
 
     def run_depthflow(
