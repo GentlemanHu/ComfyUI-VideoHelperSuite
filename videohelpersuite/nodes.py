@@ -20,6 +20,7 @@ from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDire
 from .batched_nodes import VAEEncodeBatched, VAEDecodeBatched
 from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, gifski_path, calculate_file_hash
 from .video_ops import *
+from .depth_generator import *
 
 folder_paths.folder_names_and_paths["VHS_video_formats"] = (
     [
@@ -1066,6 +1067,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_VideoInfoLoaded": VideoInfoLoaded,
     "VHS_MOVIS_COMPOSITE": CompositeMedia,
     "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
+    "VHS_DepthFlow_Generator": DepthFlowGenerator,
     # Latent and Image nodes
     "VHS_SplitLatents": SplitLatents,
     "VHS_SplitImages": SplitImages,
@@ -1104,6 +1106,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoInfoLoaded": "Video Info (Loaded) 🎥🅥🅗🅢",
     "VHS_MOVIS_COMPOSITE": "Movis Composite 🎥🅥🅗🅢",
     "VHS_MOVIS_MultiVideo": "Movis Multi-Video 🎥🅥🅗🅢",
+    "VHS_DepthFlow_Generator": "DepthFlow Generator 🎥🅥🅗🅢",
     # Latent and Image nodes
     "VHS_SplitLatents": "Split Latent Batch 🎥🅥🅗🅢",
     "VHS_SplitImages": "Split Image Batch 🎥🅥🅗🅢",
