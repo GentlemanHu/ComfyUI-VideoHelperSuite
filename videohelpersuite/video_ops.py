@@ -258,30 +258,48 @@ class CompositeMultiVideo:
         prev_transitions = [0.] + transitions
         next_transitions = transitions + [0.]
         for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
-            T = row['duration']
+            T = row['duration']  # Audio duration
             video_layer = mv.layer.Video(row['video'])
 
             video_duration = video_layer.duration
             required_duration = T + t_prev + t_next
 
-            # Calculate the number of loops needed, ensuring at least one full loop
-            num_loops = max(1, int(np.ceil(required_duration / video_duration))) 
+            # Track the last added image layer
+            last_image = None 
 
-            # Add the video layer with the calculated number of loops
-            for _ in range(num_loops):
-                image = scene.add_layer(video_layer, offset=time - t_prev, duration=video_duration)
+            if video_duration < required_duration:
+                # Loop video to match audio duration
+                remaining_duration = required_duration
+                while remaining_duration > 0:
+                    end_time = min(remaining_duration, video_duration)
+                    last_image = scene.add_layer(video_layer, offset=time - t_prev, end_time=end_time)  # Update last_image
+                    remaining_duration -= video_duration
+                    time += end_time
+            else:
+                # Trim video to match audio duration
+                last_image = scene.add_layer(video_layer, offset=time - t_prev, end_time=required_duration)  # Update last_image
+                time += required_duration
+
+            
         
         
             if row['audio'] != "":
                 scene.add_layer(mv.layer.media.Audio(row['audio']),offset=time - t_prev)
 
-            if i == 0:
-                # Add fadein effect
-                image.opacity.enable_motion().extend(keyframes=[0.0, 0.5], values=[0.0, 1.0])
-            elif i == len(timeline) - 1:
-                # Add fadeout effect
-                t = image.duration
-                image.opacity.enable_motion().extend(keyframes=[t - 0.5, t], values=[1.0, 0.0])
+            
+
+            if last_image is not None and last_image.duration >= 1:  # Check if last_image exists and is long enough
+                if i == 0:
+                    # Add fade-in effect
+                    last_image.opacity.enable_motion().extend(keyframes=[0.0, 0.5], values=[0.0, 1.0])
+                elif i == len(timeline) - 1:
+                    # Add fade-out effect
+                    t = last_image.duration
+                    last_image.opacity.enable_motion().extend(keyframes=[t - 0.5, t], values=[1.0, 0.0])
+                    
+                if 0 < i:
+                # Add fade effects
+                    last_image.opacity.enable_motion().extend(keyframes=[0.0, t_prev], values=[0.0, 1.0])
 
             # kwargs_dict = {
             #     'center': {'position': (size[0] / 2, size[1] / 2), 'origin_point': mv.Direction.CENTER},
@@ -292,9 +310,6 @@ class CompositeMultiVideo:
             #     make_logo(row['title'], duration=T, font_size=64),
             #     offset=time, position=position, origin_point=origin_point)
 
-            if 0 < i:
-                # Add fade effects
-                image.opacity.enable_motion().extend(keyframes=[0.0, t_prev], values=[0.0, 1.0])
 
             # # Add scale effect
             # values = [1.15, 1.25] if i % 2 == 0 else [1.25, 1.15]
