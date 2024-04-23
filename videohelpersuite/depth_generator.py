@@ -114,4 +114,5 @@ class DepthFlowGenerator:
         # Run the depthflow command
         subprocess.run(command)
 
-        return output_path + f".{format}"  # Return the absolute path to the output video
+        final_path = output_path + f".{format}" 
+        return {"ui":{"video_path":final_path},"result": (final_path,)}  # Return the absolute path to the output video
