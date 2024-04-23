@@ -260,36 +260,16 @@ class CompositeMultiVideo:
         for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
             T = row['duration']
             video_layer = mv.layer.Video(row['video'])
-            
+
             video_duration = video_layer.duration
-            video_full_duration = video_duration + time
             required_duration = T + t_prev + t_next
-            
-            remaining_duration = required_duration - video_duration + 1
-            
-    
-            if remaining_duration > 0:
-                # Loop and add the same video layer until the required duration is met
-                image = scene.add_layer(video_layer, offset=time - t_prev)
-                
-                last_end_time = time - t_prev
-                layer_start_time = last_end_time + video_duration
-                
-                num_loops = int(required_duration // video_duration) 
-                #至少为1次
-                if num_loops -1 == 0:
-                    image = scene.add_layer(video_layer, offset=layer_start_time,end_time=remaining_duration)
-                else:
-                    for m in range(num_loops-1):
-                        layer_start_time = last_end_time + video_duration
-                        layer_end_time = video_duration 
-                        image = scene.add_layer(video_layer, offset=layer_start_time, end_time=layer_end_time)
-                        last_end_time = layer_start_time + layer_end_time
-                        if num_loops-2 == m:
-                            image = scene.add_layer(video_layer, offset=last_end_time + video_duration, end_time=remaining_duration-(num_loops-1)*video_duration)
-            else:
-                image = scene.add_layer(video_layer, offset=time - t_prev,end_time=required_duration)
-            
+
+            # Calculate the number of loops needed, ensuring at least one full loop
+            num_loops = max(1, int(np.ceil(required_duration / video_duration))) 
+
+            # Add the video layer with the calculated number of loops
+            for _ in range(num_loops):
+                image = scene.add_layer(video_layer, offset=time - t_prev, duration=video_duration)
         
         
             if row['audio'] != "":
