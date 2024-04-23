@@ -259,6 +259,10 @@ class CompositeMultiVideo:
         next_transitions = transitions + [0.]
         for (i, row), t_prev, t_next in zip(timeline.iterrows(), prev_transitions, next_transitions):
             T = row['duration']  # Audio duration
+        
+            if row['audio'] != "":
+                scene.add_layer(mv.layer.media.Audio(row['audio']),offset=time - t_prev)
+                
             video_layer = mv.layer.Video(row['video'])
 
             video_duration = video_layer.duration
@@ -280,13 +284,6 @@ class CompositeMultiVideo:
                 last_image = scene.add_layer(video_layer, offset=time - t_prev, end_time=required_duration)  # Update last_image
                 time += required_duration
 
-            
-        
-        
-            if row['audio'] != "":
-                scene.add_layer(mv.layer.media.Audio(row['audio']),offset=time - t_prev)
-
-            
 
             if last_image is not None and last_image.duration >= 1:  # Check if last_image exists and is long enough
                 if i == 0:
