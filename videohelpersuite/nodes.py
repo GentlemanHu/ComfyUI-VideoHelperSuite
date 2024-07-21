@@ -225,6 +225,7 @@ class VideoCombine:
             "optional": {
                 "images": ("IMAGE",),
                 "audio": ("AUDIO",),
+                "audio": ("AUDIO",),
                 "meta_batch": ("VHS_BatchManager",),
                 "vae": ("VAE",),
                 "latents": ("LATENT",),
@@ -1241,6 +1242,8 @@ NODE_CLASS_MAPPINGS = {
     "VHS_VideoGentleCaptions": VideoGentleCaptions,
     "VHS_AudioToVHSAudio": AudioToVHSAudio,
     "VHS_VHSAudioToAudio": VHSAudioToAudio,
+    "VHS_AudioToVHSAudio": AudioToVHSAudio,
+    "VHS_VHSAudioToAudio": VHSAudioToAudio,
     "VHS_PruneOutputs": PruneOutputs,
     "VHS_BatchManager": BatchManager,
     "VHS_VideoInfo": VideoInfo,
@@ -1249,6 +1252,9 @@ NODE_CLASS_MAPPINGS = {
     "VHS_MOVIS_COMPOSITE": CompositeMedia,
     "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
     "VHS_DepthFlow_Generator": DepthFlowGenerator,
+    # Batched Nodes
+    "VHS_VAEEncodeBatched": VAEEncodeBatched,
+    "VHS_VAEDecodeBatched": VAEDecodeBatched,
     # Batched Nodes
     "VHS_VAEEncodeBatched": VAEEncodeBatched,
     "VHS_VAEDecodeBatched": VAEDecodeBatched,
@@ -1285,6 +1291,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢",
     "VHS_AudioToVHSAudio": "Audio to legacy VHS_AUDIO🎥🅥🅗🅢",
     "VHS_VHSAudioToAudio": "Legacy VHS_AUDIO to Audio🎥🅥🅗🅢",
+    "VHS_AudioToVHSAudio": "Audio to legacy VHS_AUDIO🎥🅥🅗🅢",
+    "VHS_VHSAudioToAudio": "Legacy VHS_AUDIO to Audio🎥🅥🅗🅢",
     "VHS_PruneOutputs": "Prune Outputs 🎥🅥🅗🅢",
     "VHS_BatchManager": "Meta Batch Manager 🎥🅥🅗🅢",
     "VHS_VideoInfo": "Video Info 🎥🅥🅗🅢",
@@ -1293,6 +1301,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_MOVIS_COMPOSITE": "Movis Composite 🎥🅥🅗🅢",
     "VHS_MOVIS_MultiVideo": "Movis Multi-Video 🎥🅥🅗🅢",
     "VHS_DepthFlow_Generator": "DepthFlow Generator 🎥🅥🅗🅢",
+    # Batched Nodes
+    "VHS_VAEEncodeBatched": "VAE Encode Batched 🎥🅥🅗🅢",
+    "VHS_VAEDecodeBatched": "VAE Decode Batched 🎥🅥🅗🅢",
     # Batched Nodes
     "VHS_VAEEncodeBatched": "VAE Encode Batched 🎥🅥🅗🅢",
     "VHS_VAEDecodeBatched": "VAE Decode Batched 🎥🅥🅗🅢",
