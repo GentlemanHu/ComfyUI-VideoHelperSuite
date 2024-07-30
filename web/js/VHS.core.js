@@ -52,6 +52,16 @@ const renameDict  = {VHS_VideoCombine : {save_output : "save_image"}}
 function useKVState(nodeType) {
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
         chainCallback(this, "onConfigure", function(info) {
+            if (this.inputs) {
+                for (let i = 0; i < this.inputs.length; i++) {
+                    let dt = this?.getInputDataType(i)
+                    if (dt && this.inputs[i]?.type != dt) {
+                        this.inputs[i].type = dt
+                        console.warn("input type mismatch for " + this.title + " slot " + i)
+
+                    }
+                }
+            }
             if (!this.widgets) {
                 //Node has no widgets, there is nothing to restore
                 return
@@ -166,7 +176,7 @@ async function uploadFile(file) {
         });
 
         if (resp.status === 200) {
-            return resp.status
+            return resp
         } else {
             alert(resp.status + " - " + resp.statusText);
         }
@@ -401,7 +411,7 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
                     }
                     let successes = 0;
                     for(const file of fileInput.files) {
-                        if (await uploadFile(file) == 200) {
+                        if ((await uploadFile(file)).status == 200) {
                             successes++;
                         } else {
                             //Upload failed, but some prior uploads may have succeeded
@@ -428,11 +438,12 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
                 style: "display: none",
                 onchange: async () => {
                     if (fileInput.files.length) {
-                        if (await uploadFile(fileInput.files[0]) != 200) {
+                        let resp = await uploadFile(fileInput.files[0])
+                        if (resp.status != 200) {
                             //upload failed and file can not be added to options
                             return;
                         }
-                        const filename = fileInput.files[0].name;
+                        const filename = (await resp.json()).name;
                         pathWidget.options.values.push(filename);
                         pathWidget.value = filename;
                         if (pathWidget.callback) {
@@ -448,11 +459,12 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
                 style: "display: none",
                 onchange: async () => {
                     if (fileInput.files.length) {
-                        if (await uploadFile(fileInput.files[0]) != 200) {
+                        let resp = await uploadFile(fileInput.files[0])
+                        if (resp.status != 200) {
                             //upload failed and file can not be added to options
                             return;
                         }
-                        const filename = fileInput.files[0].name;
+                        const filename = (await resp.json()).name;
                         pathWidget.options.values.push(filename);
                         pathWidget.value = filename;
                         if (pathWidget.callback) {
@@ -799,7 +811,7 @@ function addLoadVideoCommon(nodeType, nodeData) {
         let update = function (value, _, node) {
             let param = {}
             param[this.name] = value
-            node.updateParameters(param);
+            node?.updateParameters(param);
         }
         chainCallback(frameCapWidget, "callback", update);
         chainCallback(frameSkipWidget, "callback", update);
@@ -808,7 +820,7 @@ function addLoadVideoCommon(nodeType, nodeData) {
         let priorSize = sizeWidget.value;
         let updateSize = function(value, _, node) {
             if (sizeWidget.value == 'Custom' || priorSize != sizeWidget.value) {
-                node.updateParameters({"force_size": sizeWidget.serializePreview()});
+                node?.updateParameters({"force_size": sizeWidget.serializePreview()});
             }
             priorSize = sizeWidget.value;
         }
@@ -1113,7 +1125,7 @@ app.registerExtension({
                     }
                     format += "/" + extension;
                     let params = {filename : value, type: "path", format: format};
-                    this.updateParameters(params, true);
+                    this?.updateParameters(params, true);
                 });
             });
             addLoadVideoCommon(nodeType, nodeData);
@@ -1131,8 +1143,6 @@ app.registerExtension({
             addFormatWidgets(nodeType);
             addVAEInputToggle(nodeType, nodeData)
 
-            //Hide the information passing 'gif' output
-            //TODO: check how this is implemented for save image
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
                 this._outputs = this.outputs
                 Object.defineProperty(this, "outputs", {
