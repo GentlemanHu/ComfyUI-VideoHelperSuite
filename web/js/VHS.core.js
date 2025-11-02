@@ -1,5 +1,6 @@
 import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
+import { setWidgetConfig } from '../../../extensions/core/widgetInputs.js'
 import { applyTextReplacements } from "../../../scripts/utils.js";
 
 function chainCallback(object, property, callback) {
@@ -12,33 +13,21 @@ function chainCallback(object, property, callback) {
         const callback_orig = object[property]
         object[property] = function () {
             const r = callback_orig.apply(this, arguments);
-            callback.apply(this, arguments);
-            return r
+            return callback.apply(this, arguments) ?? r
         };
     } else {
         object[property] = callback;
     }
 }
 
-function injectHidden(widget) {
-    widget.computeSize = (target_width) => {
-        if (widget.hidden) {
-            return [0, -4];
-        }
-        return [target_width, 20];
-    };
-    widget._type = widget.type
-    Object.defineProperty(widget, "type", {
-        set : function(value) {
-            widget._type = value;
-        },
-        get : function() {
-            if (widget.hidden) {
-                return "hidden";
-            }
-            return widget._type;
-        }
-    });
+function getNodeById(id, graph=app.graph) {
+    let cg = graph
+    let node = undefined
+    for (let sid of (''+id).split(':')) {
+        node = cg?.getNodeById?.(sid)
+        cg = node?.subgraph
+    }
+    return node
 }
 
 const convDict = {
@@ -52,16 +41,6 @@ const renameDict  = {VHS_VideoCombine : {save_output : "save_image"}}
 function useKVState(nodeType) {
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
         chainCallback(this, "onConfigure", function(info) {
-            if (this.inputs) {
-                for (let i = 0; i < this.inputs.length; i++) {
-                    let dt = this?.getInputDataType(i)
-                    if (dt && this.inputs[i]?.type != dt && !(dt == "IMAGE" && this.inputs[i].type == "LATENT")) {
-                        this.inputs[i].type = dt
-                        console.warn("input type mismatch for " + this.title + " slot " + i)
-
-                    }
-                }
-            }
             if (!this.widgets) {
                 //Node has no widgets, there is nothing to restore
                 return
@@ -92,15 +71,50 @@ function useKVState(nodeType) {
                     }
                 }
             }
+            if ('force_size' in widgetDict) {
+                //force size has been phased out, Migrate state
+                if (widgetDict.force_size.includes?.('x')) {
+                    let sizes = widgetDict.force_size.split('x')
+                    if (sizes[0] != '?') {
+                        widgetDict.custom_width = parseInt(sizes[0])
+                    } else {
+                        widgetDict.custom_width = 0
+                    }
+                    if (sizes[1] != '?') {
+                        widgetDict.custom_height = parseInt(sizes[1])
+                    } else {
+                        widgetDict.custom_height = 0
+                    }
+                } else {
+                    if (['Disabled', 'Custom Height'].includes(widgetDict.force_size)) {
+                        widgetDict.custom_width = 0
+                    }
+                    if (['Disabled', 'Custom Width'].includes(widgetDict.force_size)) {
+                        widgetDict.custom_height = 0
+                    }
+                }
+            }
+            if (widgetDict.videopreview?.params?.force_size) {
+                delete widgetDict.videopreview.params.force_size
+            }
+            let inputs = {}
+            for (let i of this.inputs) {
+                inputs[i.name] = i
+            }
             if (widgetDict.length == undefined) {
                 for (let w of this.widgets) {
+                    if (w.type =="button") {
+                        continue
+                    }
                     if (w.name in widgetDict) {
                         w.value = widgetDict[w.name];
+                        w.callback?.(w.value)
                     } else {
                         //Check for a legacy name that needs migrating
                         if (this.type in renameDict && w.name in renameDict[this.type]) {
                             if (renameDict[this.type][w.name] in widgetDict) {
                                 w.value = widgetDict[renameDict[this.type][w.name]]
+                                w.callback?.(w.value)
                                 continue
                             }
                         }
@@ -122,7 +136,11 @@ function useKVState(nodeType) {
                         }
                         if (initialValue) {
                             w.value = initialValue;
+                            w.callback?.(w.value)
                         }
+                    }
+                    if (w.name in inputs && w.config) {
+                        setWidgetConfig(inputs[w.name], w.config)
                     }
                 }
             } else {
@@ -156,26 +174,26 @@ if (!app.helpDOM) {
 }
 function initHelpDOM() {
     let parentDOM = document.createElement("div");
+    parentDOM.className = "VHS_floatinghelp"
     document.body.appendChild(parentDOM)
     parentDOM.appendChild(helpDOM)
     helpDOM.className = "litegraph";
     let scrollbarStyle = document.createElement('style');
     scrollbarStyle.innerHTML = `
-    <style id="scroll-properties">
-            * {
+            .VHS_floatinghelp {
                 scrollbar-width: 6px;
                 scrollbar-color: #0003  #0000;
-            }
-            ::-webkit-scrollbar {
-                background: transparent;
-                width: 6px;
-            }
-            ::-webkit-scrollbar-thumb {
-                background: #0005;
-                border-radius: 20px
-            }
-            ::-webkit-scrollbar-button {
-                display: none;
+                &::-webkit-scrollbar {
+                    background: transparent;
+                    width: 6px;
+                }
+                &::-webkit-scrollbar-thumb {
+                    background: #0005;
+                    border-radius: 20px
+                }
+                &::-webkit-scrollbar-button {
+                    display: none;
+                }
             }
             .VHS_loopedvideo::-webkit-media-controls-mute-button {
                 display:none;
@@ -183,8 +201,8 @@ function initHelpDOM() {
             .VHS_loopedvideo::-webkit-media-controls-fullscreen-button {
                 display:none;
             }
-        </style>
     `
+    scrollbarStyle.id = 'scroll-properties'
     parentDOM.appendChild(scrollbarStyle)
     chainCallback(app.canvas, "onDrawForeground", function (ctx, visible_rect){
         let n = helpDOM.node
@@ -336,13 +354,16 @@ function initHelpDOM() {
                     helpDOM.node = undefined
                 } else {
                     helpDOM.node = this;
-                    helpDOM.innerHTML = this.description || "no help provided ".repeat(20)
+                    helpDOM.innerHTML = this.description || "no help provided "
                     for (let e of helpDOM.querySelectorAll('.VHS_collapse')) {
                         e.children[0].onclick = helpDOM.collapseOnClick
                         e.children[0].style.cursor = 'pointer'
                     }
                     for (let e of helpDOM.querySelectorAll('.VHS_precollapse')) {
                         setCollapse(e, true)
+                    }
+                    for (let e of helpDOM.querySelectorAll('.VHS_loopedvideo')) {
+                        e?.play()
                     }
                     helpDOM.parentElement.scrollTo(0,0)
                 }
@@ -409,9 +430,35 @@ function fitHeight(node) {
     node.setSize([node.size[0], node.computeSize([node.size[0], node.size[1]])[1]])
     node?.graph?.setDirtyCanvas(true);
 }
+function startDraggingItems(node, pointer) {
+    app.canvas.emitBeforeChange()
+    app.canvas.graph?.beforeChange()
+    // Ensure that dragging is properly cleaned up, on success or failure.
+    pointer.finally = () => {
+      app.canvas.isDragging = false
+      app.canvas.graph?.afterChange()
+      app.canvas.emitAfterChange()
+    }
+    app.canvas.processSelect(node, pointer.eDown, true)
+    app.canvas.isDragging = true
+}
+function processDraggedItems(e) {
+    if (e.shiftKey || LiteGraph.alwaysSnapToGrid)
+      app.canvas?.graph?.snapToGrid(app.canvas.selectedItems)
+    app.canvas.dirty_canvas = true
+    app.canvas.dirty_bgcanvas = true
+    app.canvas.onNodeMoved?.(findFirstNode(app.canvas.selectedItems))
+}
+function allowDragFromWidget(widget) {
+    widget.onPointerDown = function(pointer, node) {
+        pointer.onDragStart = () => startDraggingItems(node, pointer)
+        pointer.onDragEnd = processDraggedItems
+        app.canvas.dirty_canvas = true
+        return true
+    }
+}
 
-async function uploadFile(file) {
-    //TODO: Add uploaded file to cache with Cache.put()?
+async function uploadFile(file, progressCallback) {
     try {
         // Wrap file in formdata so it includes filename
         const body = new FormData();
@@ -425,62 +472,40 @@ async function uploadFile(file) {
         if (i > 0) {
             body.append("subfolder", subfolder);
         }
-        const resp = await api.fetchApi("/upload/image", {
-            method: "POST",
-            body,
-        });
+        const url = api.apiURL("/upload/image")
+        const resp = await new Promise((resolve) => {
+            let req = new XMLHttpRequest()
+            req.upload.onprogress = (e) => progressCallback?.(e.loaded/e.total)
+            req.onload = () => resolve(req)
+            req.open('post', url, true)
+            req.send(body)
+        })
 
-        if (resp.status === 200) {
-            return resp
-        } else {
+        if (resp.status !== 200) {
             alert(resp.status + " - " + resp.statusText);
         }
+        return resp
     } catch (error) {
         alert(error);
     }
 }
-function applyVHSAudioLinksFix(nodeType, nodeData, audio_slot) {
-    chainCallback(nodeType.prototype, "onConnectionsChange", function(contype, slot, iscon, linfo) {
-        if (contype == LiteGraph.OUTPUT && slot == audio_slot) {
-            if (linfo.type == "VHS_AUDIO") {
-                this.outputs[audio_slot].type = "AUDIO"
-                let tnode = app.graph._nodes_by_id[linfo.target_id]
-                let inputDef = LiteGraph.registered_node_types[tnode.type].nodeData?.input
-                let has_migrated = true
-                if (inputDef?.required) {
-                    for (let k in inputDef.required) {
-                        if (inputDef.required[k][0] == "VHS_AUDIO") {
-                            has_migrated = false
-                            break
-                        }
-                    }
-                }
-                if (has_migrated &&inputDef?.optional) {
-                    for (let k in inputDef.optional) {
-                        if (inputDef.optional[k][0] == "VHS_AUDIO") {
-                            has_migrated = false
-                            break
-                        }
-                    }
-                }
-                if (!has_migrated) {
-                    //need to add node and migrate
-                    app.ui.dialog.show("This workflow contains one or more nodes which use the old VHS_AUDIO format. They have been highlighted in red. An AudioToVHSAudio node must be added to convert to this legacy format")
-                    tnode.bgcolor = "#C00"
-                }
-            }
-        }
-    })
-}
+
 function addVAEOutputToggle(nodeType, nodeData) {
+    chainCallback(nodeType.prototype, "onNodeCreated", function() {
+        this.reject_ue_connection = (input) => input?.name == "vae"
+    })
     chainCallback(nodeType.prototype, "onConnectionsChange", function(contype, slot, iscon, linfo) {
-        if (contype == LiteGraph.INPUT && slot == 1 && this.inputs[1].type == "VAE") {
+        let slotType = this.inputs[slot]?.type
+        if (contype == LiteGraph.INPUT && slotType == "VAE") {
             if (iscon && linfo) {
                 if (this.linkTimeout) {
                     clearTimeout(this.linkTimeout)
                     this.linkTimeout = false
                 } else if (this.outputs[0].type == "IMAGE") {
                     this.linkTimeout = setTimeout(() => {
+                        if (this.outputs[0].type != "IMAGE") {
+                            return
+                        }
                         this.linkTimeout = false
                         this.disconnectOutput(0);
                     }, 50)
@@ -501,6 +526,9 @@ function addVAEOutputToggle(nodeType, nodeData) {
     });
 }
 function addVAEInputToggle(nodeType, nodeData) {
+    chainCallback(nodeType.prototype, "onNodeCreated", function() {
+        this.reject_ue_connection = (input) => input?.name == "vae"
+    })
     chainCallback(nodeType.prototype, "onConnectionsChange", function(contype, slot, iscon, linf) {
         if (contype == LiteGraph.INPUT && slot == 3 && this.inputs[3].type == "VAE") {
             if (iscon && linf) {
@@ -509,6 +537,10 @@ function addVAEInputToggle(nodeType, nodeData) {
                     this.linkTimeout = false
                 } else if (this.inputs[0].type == "IMAGE") {
                     this.linkTimeout = setTimeout(() => {
+                        //workaround for out of order loading
+                        if (this.inputs[0].type != "IMAGE") {
+                            return
+                        }
                         this.linkTimeout = false
                         this.disconnectInput(0);
                     }, 50)
@@ -527,7 +559,38 @@ function addVAEInputToggle(nodeType, nodeData) {
     });
 }
 function cloneType(nodeType, nodeData) {
-    nodeData.output[0] = "VHS_DUMMY_NONE"
+    chainCallback(nodeType.prototype, "onNodeCreated", function() {
+        this.changeOutputType = function (new_type) {
+            this.linkTimeout = setTimeout(() => {
+                this.linkTimeout = false
+                if (this.outputs[0].type != new_type) {
+                    this.outputs[0].type = new_type
+                    //check and potentially remove links
+                    if (!this.outputs[0].links) {
+                        return
+                    }
+                    let removed_links = []
+                    for (let link_id of this.outputs[0].links) {
+                        let link = app.graph.links[link_id]
+                        if (!link)
+                            debugger
+                        let target_node = app.graph.getNodeById(link.target_id)
+                        let target_input = target_node.inputs[link.target_slot]
+                        let keep = LiteGraph.isValidConnection(new_type, target_input.type)
+                        if (!keep) {
+                            link.disconnect(app.graph, 'input')
+                            removed_links.push(link_id)
+                        }
+                        target_node.onConnectionsChange?.(LiteGraph.INPUT,
+                            link.target_slot, keep, link, target_input)
+                    }
+                    this.outputs[0].links = this.outputs[0].links
+                        .filter((v) => !removed_links.includes(v))
+                }
+            }, 50)
+        }
+        this.changeOutputType("VHS_DUMMY_NONE")
+    });
     chainCallback(nodeType.prototype, "onConnectionsChange", function(contype, slot, iscon, linf) {
         if (contype == LiteGraph.INPUT && slot == 0) {
             let new_type = "VHS_DUMMY_NONE"
@@ -536,15 +599,8 @@ function cloneType(nodeType, nodeData) {
             }
             if (this.linkTimeout) {
                 clearTimeout(this.linkTimeout)
-                this.linkTimeout = false
             }
-            this.linkTimeout = setTimeout(() => {
-                if (this.outputs[0].type != new_type) {
-                    this.outputs[0].type = new_type
-                    this.disconnectOutput(0);
-                }
-                this.linkTimeout = false
-            }, 50)
+            this.changeOutputType(new_type)
         }
     });
 }
@@ -589,58 +645,84 @@ function addTimestampWidget(nodeType, nodeData, targetWidget) {
         });
     });
 }
-
-function addCustomSize(nodeType, nodeData, widgetName) {
-    //Add a callback which sets up the actual logic once the node is created
+function initializeLoadFormat(nodeType, nodeData) {
+    if (!nodeData?.input?.optional?.format) {
+        return
+    }
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
-        const node = this;
-        const sizeOptionWidget = node.widgets.find((w) => w.name === widgetName);
-        const widthWidget = node.widgets.find((w) => w.name === "custom_width");
-        const heightWidget = node.widgets.find((w) => w.name === "custom_height");
-        injectHidden(widthWidget);
-        injectHidden(heightWidget);
-        sizeOptionWidget._value = sizeOptionWidget.value;
-        Object.defineProperty(sizeOptionWidget, "value", {
-            set : function(value) {
-                //TODO: Only modify hidden/reset size when a change occurs
-                if (value == "Custom Width") {
-                    widthWidget.hidden = false;
-                    heightWidget.hidden = true;
-                } else if (value == "Custom Height") {
-                    widthWidget.hidden = true;
-                    heightWidget.hidden = false;
-                } else if (value == "Custom") {
-                    widthWidget.hidden = false;
-                    heightWidget.hidden = false;
-                } else{
-                    widthWidget.hidden = true;
-                    heightWidget.hidden = true;
+        let node = this
+        let formatWidget = this.widgets.find((w) => w.name === "format")
+        formatWidget.options.formats = nodeData.input.optional.format[1].formats
+        let base = {}
+        for (let widget of this.widgets) {
+           if (['force_rate', 'custom_width', 'custom_height',
+               'frame_load_cap'].includes(widget.name)) {
+               //TODO: filter these options?
+               base[widget.name] = widget.options
+           }
+        }
+        chainCallback(formatWidget, "callback", function(value) {
+            let format = this.options.formats[value]
+            if (!format) {
+                return
+            }
+            if ('target_rate' in format) {
+                format.force_rate = {'reset': format.target_rate}
+            }
+            if ('dim' in format) {
+                format.custom_width = {'step': format.dim[0], 'mod': format.dim[1]}
+                format.custom_height = {'step': format.dim[0], 'mod': format.dim[1]}
+                if (format.dim[2]) {
+                    format.custom_width.reset = format.dim[2]
                 }
-                node.setSize([node.size[0], node.computeSize([node.size[0], node.size[1]])[1]])
-                this._value = value;
-            },
-            get : function() {
-                return this._value;
+                if (format.dim[3]) {
+                    format.custom_height.reset = format.dim[3]
+                }
             }
-        });
-        //Ensure proper visibility/size state for initial value
-        sizeOptionWidget.value = sizeOptionWidget._value;
+            if ('frames' in format) {
+                format.frame_load_cap = {'step': format.frames[0], 'mod': format.frames[1]}
+            }
+            for (let widget of node.widgets) {
+                if (widget.name in base) {
+                    let wasDefault = widget.options?.reset == widget.value
+                    widget.options = Object.assign({}, base[widget.name], format[widget.name])
+                    if (wasDefault && widget.options.reset != undefined) {
+                        widget.value = widget.options.reset
+                    }
+                    widget.callback(widget.value)
+                }
+            }
 
-        sizeOptionWidget.serializePreview = function() {
-            if (this.value == "Custom Width") {
-                return widthWidget.value + "x?";
-            } else if (this.value == "Custom Height") {
-                return "?x" + heightWidget.value;
-            } else if (this.value == "Custom") {
-                return widthWidget.value + "x" + heightWidget.value;
-            } else {
-                return this.value;
+        });
+        let capWidget = this.widgets.find((w) => w.name === "frame_load_cap")
+        capWidget.annotation = (value, width) => {
+            let max_frames = this.video_query?.loaded?.frames
+            if (!max_frames || value && value < max_frames) {
+                return
             }
-        };
+            let format = formatWidget.options.formats[formatWidget.value]
+            const div = format?.frames?.[0] ?? 1
+            const mod = format?.frames?.[1] ?? 0
+            let loadable_frames = max_frames
+            if ((max_frames % div) != mod) {
+                loadable_frames = ((max_frames - mod)/div|0) * div + mod
+            }
+            return loadable_frames + "\u21FD"
+        }
+        let rateWidget = this.widgets.find((w) => w.name === "force_rate")
+        rateWidget.annotation = (value, width) => {
+            if (value == 0 && this.video_query?.source?.fps != undefined) {
+                return roundToPrecision(this.video_query.source.fps, 2) + "\u21FD"
+            }
+        }
     });
 }
+
 function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
+    let accept = {'video': ["video/webm","video/mp4","video/x-matroska","image/gif"],
+                  'audio': ["audio/mpeg","audio/wav","audio/x-wav","audio/ogg"]}
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
+        const node = this
         const pathWidget = this.widgets.find((w) => w.name === widgetName);
         const fileInput = document.createElement("input");
         chainCallback(this, "onRemoved", () => {
@@ -663,10 +745,12 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
                         return;
                     }
                     let successes = 0;
+                    const onProg = (p) => this.progress = (successes + p) / fileInput.files.length
                     for(const file of fileInput.files) {
-                        if ((await uploadFile(file)).status == 200) {
+                        if ((await uploadFile(file, onProg)).status == 200) {
                             successes++;
                         } else {
+                            this.progress = undefined
                             //Upload failed, but some prior uploads may have succeeded
                             //Stop future uploads to prevent cascading failures
                             //and only add to list if an upload has succeeded
@@ -677,6 +761,7 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
                             }
                         }
                     }
+                    this.progress = undefined
                     pathWidget.options.values.push(path);
                     pathWidget.value = path;
                     if (pathWidget.callback) {
@@ -684,50 +769,45 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
                     }
                 },
             });
-        } else if (type == "video") {
+        } else {
+            let accept = {'video': ["video/webm","video/mp4","video/x-matroska","image/gif"],
+                          'audio': ["audio/mpeg","audio/wav","audio/x-wav","audio/ogg"]}[type]
+            async function doUpload(file) {
+                let resp = await uploadFile(file, (p) => node.progress = p)
+                node.progress = undefined
+                if (resp.status != 200) {
+                    return false
+                }
+                const filename = JSON.parse(resp.responseText).name;
+                pathWidget.options.values.push(filename);
+                pathWidget.value = filename;
+                if (pathWidget.callback) {
+                    pathWidget.callback(filename)
+                }
+                return true
+            }
             Object.assign(fileInput, {
                 type: "file",
-                accept: "video/webm,video/mp4,video/mkv,image/gif",
+                accept: accept.join(','),
                 style: "display: none",
                 onchange: async () => {
                     if (fileInput.files.length) {
-                        let resp = await uploadFile(fileInput.files[0])
-                        if (resp.status != 200) {
-                            //upload failed and file can not be added to options
-                            return;
-                        }
-                        const filename = (await resp.json()).name;
-                        pathWidget.options.values.push(filename);
-                        pathWidget.value = filename;
-                        if (pathWidget.callback) {
-                            pathWidget.callback(filename)
-                        }
+                        return await doUpload(fileInput.files[0])
                     }
                 },
             });
-        } else if (type == "audio") {
-            Object.assign(fileInput, {
-                type: "file",
-                accept: "audio/mpeg,audio/wav,audio/x-wav,audio/ogg",
-                style: "display: none",
-                onchange: async () => {
-                    if (fileInput.files.length) {
-                        let resp = await uploadFile(fileInput.files[0])
-                        if (resp.status != 200) {
-                            //upload failed and file can not be added to options
-                            return;
-                        }
-                        const filename = (await resp.json()).name;
-                        pathWidget.options.values.push(filename);
-                        pathWidget.value = filename;
-                        if (pathWidget.callback) {
-                            pathWidget.callback(filename)
-                        }
-                    }
-                },
-            });
-        }else {
-            throw "Unknown upload type"
+            this.onDragOver = (e) => !!e?.dataTransfer?.types?.includes?.('Files')
+            this.onDragDrop = async function(e) {
+                if (!e?.dataTransfer?.types?.includes?.('Files')) {
+                    return false
+                }
+                //TODO: Allow dragging multiple files at once?
+                const item = e.dataTransfer?.files?.[0]
+                if (accept.includes(item?.type)) {
+                    return await doUpload(item)
+                }
+                return false
+            }
         }
         document.body.append(fileInput);
         let uploadWidget = this.addWidget("button", "choose " + type + " to upload", "image", () => {
@@ -737,10 +817,101 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
             fileInput.click();
         });
         uploadWidget.options.serialize = false;
+
+
+    });
+}
+function addAudioPreview(nodeType, isInput=true) {
+    chainCallback(nodeType.prototype, "onNodeCreated", function() {
+        var element = document.createElement("audio");
+        element.controls = true
+        const previewNode = this;
+        var previewWidget = this.addDOMWidget("audiopreview", "preview", element, {
+            serialize: false,
+            hideOnZoom: true,
+            getValue() {
+                return element.value;
+            },
+            setValue(v) {
+                element.value = v;
+            },
+        });
+        previewWidget.computeSize = function(width) {
+            return [width, 50];
+        }
+        var timeout = null;
+        this.updateParameters = (params, force_update) => {
+            if (!previewWidget.value.params) {
+                if(typeof(previewWidget.value) != 'object') {
+                    previewWidget.value =  {}
+                }
+                previewWidget.value.params = {}
+            }
+            Object.assign(previewWidget.value.params, params)
+            if (!force_update &&
+                app.ui.settings.getSettingValue("VHS.AdvancedPreviews") == 'Never') {
+                return;
+            }
+            if (timeout) {
+                clearTimeout(timeout);
+            }
+            if (force_update) {
+                previewWidget.updateSource();
+            } else {
+                timeout = setTimeout(() => previewWidget.updateSource(),100);
+            }
+        };
+        previewWidget.updateSource = function () {
+            if (this.value.params == undefined) {
+                return;
+            }
+            let params =  {}
+            let advp = app.ui.settings.getSettingValue("VHS.AdvancedPreviews")
+            if (advp == 'Never') {
+                advp = false
+            } else if (advp == 'Input Only') {
+                advp = isInput
+            } else {
+                advp = true
+            }
+            Object.assign(params, this.value.params);//shallow copy
+            params.timestamp = Date.now()
+            if (!advp) {
+                element.src = api.apiURL('/view?' + new URLSearchParams(params));
+            } else {
+                params.deadline = app.ui.settings.getSettingValue("VHS.AdvancedPreviewsDeadline")
+                element.src = api.apiURL('/vhs/viewaudio?' + new URLSearchParams(params));
+            }
+        }
+        previewWidget.callback = previewWidget.updateSource
+
+
+        //setup widget tracking
+        function update(key) {
+            return function(value) {
+                let params = {}
+                params[key] = this.value
+                previewNode?.updateParameters(params)
+            }
+        }
+        let widgetMap = { 'seek_seconds': 'start_time', 'duration': 'duration',
+            'start_time': 'start_time' }
+        for (let widget of this.widgets) {
+            if (widget.name in widgetMap) {
+                if (typeof(widgetMap[widget.name]) == 'function') {
+                    chainCallback(widget, "callback", widgetMap[widget.name]);
+                } else {
+                    chainCallback(widget, "callback", update(widgetMap[widget.name]))
+                }
+            }
+            if (widget.type != "button") {
+                widget.callback?.(widget.value)
+            }
+        }
     });
 }
 
-function addVideoPreview(nodeType) {
+function addVideoPreview(nodeType, isInput=true) {
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
         var element = document.createElement("div");
         const previewNode = this;
@@ -754,6 +925,7 @@ function addVideoPreview(nodeType) {
                 element.value = v;
             },
         });
+        allowDragFromWidget(previewWidget)
         previewWidget.computeSize = function(width) {
             if (this.aspectRatio && !this.parentEl.hidden) {
                 let height = (previewNode.size[0]-20)/ this.aspectRatio + 10;
@@ -777,8 +949,22 @@ function addVideoPreview(nodeType) {
             e.preventDefault()
             return app.canvas._mousewheel_callback(e)
         }, true);
+        element.addEventListener('pointermove', (e)  => {
+            e.preventDefault()
+            return app.canvas._mousemove_callback(e)
+        }, true);
+        element.addEventListener('pointerup', (e)  => {
+            e.preventDefault()
+            return app.canvas._mouseup_callback(e)
+        }, true);
+        element.addEventListener('dragover', (e) => {
+            //A little hacky, but allows drag events onto the preview itself
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            app.dragOverNode = this
+        })
         previewWidget.value = {hidden: false, paused: false, params: {},
-            muted: app.ui.settings.getSettingValue("VHS.DefaultMute", false)}
+            muted: app.ui.settings.getSettingValue("VHS.DefaultMute")}
         previewWidget.parentEl = document.createElement("div");
         previewWidget.parentEl.className = "vhs_preview";
         previewWidget.parentEl.style['width'] = "100%"
@@ -812,18 +998,19 @@ function addVideoPreview(nodeType) {
             previewWidget.aspectRatio = previewWidget.imgEl.naturalWidth / previewWidget.imgEl.naturalHeight;
             fitHeight(this);
         };
-
+        previewWidget.parentEl.appendChild(previewWidget.videoEl)
+        previewWidget.parentEl.appendChild(previewWidget.imgEl)
         var timeout = null;
         this.updateParameters = (params, force_update) => {
             if (!previewWidget.value.params) {
-                if(typeof(previewWidget.value != 'object')) {
+                if(typeof(previewWidget.value) != 'object') {
                     previewWidget.value =  {hidden: false, paused: false}
                 }
                 previewWidget.value.params = {}
             }
             Object.assign(previewWidget.value.params, params)
             if (!force_update &&
-                !app.ui.settings.getSettingValue("VHS.AdvancedPreviews", false)) {
+                app.ui.settings.getSettingValue("VHS.AdvancedPreviews") == 'Never') {
                 return;
             }
             if (timeout) {
@@ -840,28 +1027,38 @@ function addVideoPreview(nodeType) {
                 return;
             }
             let params =  {}
+            let advp = app.ui.settings.getSettingValue("VHS.AdvancedPreviews")
+            if (advp == 'Never') {
+                advp = false
+            } else if (advp == 'Input Only') {
+                advp = isInput
+            } else {
+                advp = true
+            }
             Object.assign(params, this.value.params);//shallow copy
+            params.timestamp = Date.now()
             this.parentEl.hidden = this.value.hidden;
-            if (params.format?.split('/')[0] == 'video' ||
-                app.ui.settings.getSettingValue("VHS.AdvancedPreviews", false) &&
-                (params.format?.split('/')[1] == 'gif') || params.format == 'folder') {
+            if (params.format?.split('/')[0] == 'video'
+                || advp && (params.format?.split('/')[1] == 'gif')
+                || params.format == 'folder') {
+
                 this.videoEl.autoplay = !this.value.paused && !this.value.hidden;
-                let target_width = 256
-                if (element.style?.width) {
-                    //overscale to allow scrolling. Endpoint won't return higher than native
-                    target_width = element.style.width.slice(0,-2)*2;
-                }
-                if (!params.force_size || params.force_size.includes("?") || params.force_size == "Disabled") {
-                    params.force_size = target_width+"x?"
+                if (!advp) {
+                    this.videoEl.src = api.apiURL('/view?' + new URLSearchParams(params));
                 } else {
-                    let size = params.force_size.split("x")
-                    let ar = parseInt(size[0])/parseInt(size[1])
-                    params.force_size = target_width+"x"+(target_width/ar)
-                }
-                if (app.ui.settings.getSettingValue("VHS.AdvancedPreviews", false)) {
-                    this.videoEl.src = api.apiURL('/viewvideo?' + new URLSearchParams(params));
-                } else {
-                    previewWidget.videoEl.src = api.apiURL('/view?' + new URLSearchParams(params));
+                    let target_width = (previewNode.size[0]-20)*2 || 256;
+                    let minWidth = app.ui.settings.getSettingValue("VHS.AdvancedPreviewsMinWidth")
+                    if (target_width < minWidth) {
+                        target_width = minWidth
+                    }
+                    if (!params.custom_width || !params.custom_height) {
+                        params.force_size = target_width+"x?"
+                    } else {
+                        let ar = params.custom_width/params.custom_height
+                        params.force_size = target_width+"x"+(target_width/ar)
+                    }
+                    params.deadline = app.ui.settings.getSettingValue("VHS.AdvancedPreviewsDeadline")
+                    this.videoEl.src = api.apiURL('/vhs/viewvideo?' + new URLSearchParams(params));
                 }
                 this.videoEl.hidden = false;
                 this.imgEl.hidden = true;
@@ -871,11 +1068,29 @@ function addVideoPreview(nodeType) {
                 this.videoEl.hidden = true;
                 this.imgEl.hidden = false;
             }
+            delete previewNode.video_query
+            const doQuery = async () => {
+                if (!previewWidget?.value?.params?.filename) {
+                    return
+                }
+                let qurl = api.apiURL('/vhs/queryvideo?' + new URLSearchParams(previewWidget.value.params))
+                let query = undefined
+                try {
+                    let query_res = await fetch(qurl)
+                    query = await query_res.json()
+                } catch(e) {
+                    return
+                }
+                previewNode.video_query = query
+            }
+            doQuery()
         }
+        previewWidget.callback = previewWidget.updateSource
         previewWidget.parentEl.appendChild(previewWidget.videoEl)
         previewWidget.parentEl.appendChild(previewWidget.imgEl)
     });
 }
+let copiedPath = undefined
 function addPreviewOptions(nodeType) {
     chainCallback(nodeType.prototype, "getExtraMenuOptions", function(_, options) {
         // The intended way of appending options is returning a list of extra options,
@@ -886,13 +1101,21 @@ function addPreviewOptions(nodeType) {
 
         let url = null
         if (previewWidget.videoEl?.hidden == false && previewWidget.videoEl.src) {
-            //Use full quality video
-            url = api.apiURL('/view?' + new URLSearchParams(previewWidget.value.params));
-            //Workaround for 16bit png: Just do first frame
-            url = url.replace('%2503d', '001')
+            if (['input', 'output', 'temp'].includes(previewWidget.value.params.type)) {
+                //Use full quality video
+                url = api.apiURL('/view?' + new URLSearchParams(previewWidget.value.params));
+                //Workaround for 16bit png: Just do first frame
+                url = url.replace('%2503d', '001')
+            }
         } else if (previewWidget.imgEl?.hidden == false && previewWidget.imgEl.src) {
             url = previewWidget.imgEl.src;
             url = new URL(url);
+        }
+        if (this.video_query?.source) {
+            let info_string = this.video_query.source.size.join('x') +
+                              '@' + this.video_query.source.fps + 'fps ' +
+                              this.video_query.source.frames + 'frames'
+            optNew.push({content: info_string, disabled: true})
         }
         if (url) {
             optNew.push(
@@ -907,13 +1130,42 @@ function addPreviewOptions(nodeType) {
                     callback: () => {
                         const a = document.createElement("a");
                         a.href = url;
-                        a.setAttribute("download", new URLSearchParams(previewWidget.value.params).get("filename"));
+                        a.setAttribute("download", previewWidget.value.params.filename);
                         document.body.append(a);
                         a.click();
                         requestAnimationFrame(() => a.remove());
                     },
                 }
             );
+            if (previewWidget.value.params.fullpath) {
+                copiedPath = previewWidget.value.params.fullpath
+                const blob = new Blob([previewWidget.value.params.fullpath],
+                    { type: 'text/plain'})
+                optNew.push({
+                    content: "Copy output filepath",
+                    callback: async () => {
+                        await navigator.clipboard.write([
+                            new ClipboardItem({
+                                'text/plain': blob
+                            })])}
+                });
+            }
+            if (previewWidget.value.params.workflow) {
+                let wParams = {...previewWidget.value.params,
+                    filename: previewWidget.value.params.workflow}
+                let wUrl = api.apiURL('/view?' + new URLSearchParams(wParams));
+                optNew.push({
+                    content: "Save workflow image",
+                    callback: () => {
+                        const a = document.createElement("a");
+                        a.href = wUrl;
+                        a.setAttribute("download", previewWidget.value.params.workflow);
+                        document.body.append(a);
+                        a.click();
+                        requestAnimationFrame(() => a.remove());
+                    }
+                });
+            }
         }
         const PauseDesc = (previewWidget.value.paused ? "Resume" : "Pause") + " preview";
         if(previewWidget.videoEl.hidden == false) {
@@ -967,18 +1219,7 @@ function addPreviewOptions(nodeType) {
         options.unshift(...optNew);
     });
 }
-function addFormatWidgets(nodeType) {
-    function parseFormats(options) {
-        options.fullvalues = options._values;
-        options._values = [];
-        for (let format of options.fullvalues) {
-            if (Array.isArray(format)) {
-                options._values.push(format[0]);
-            } else {
-                options._values.push(format);
-            }
-        }
-    }
+function addFormatWidgets(nodeType, nodeData) {
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
         var formatWidget = null;
         var formatWidgetIndex = -1;
@@ -986,139 +1227,111 @@ function addFormatWidgets(nodeType) {
             if (this.widgets[i].name === "format"){
                 formatWidget = this.widgets[i];
                 formatWidgetIndex = i+1;
+                break
             }
         }
         let formatWidgetsCount = 0;
-        //Pre-process options to just names
-        formatWidget.options._values = formatWidget.options.values;
-        parseFormats(formatWidget.options);
-        Object.defineProperty(formatWidget.options, "values", {
-            set : (value) => {
-                formatWidget.options._values  = value;
-                parseFormats(formatWidget.options);
-            },
-            get : () => {
-                return formatWidget.options._values;
-            }
-        })
-
-        formatWidget._value = formatWidget.value;
-        Object.defineProperty(formatWidget, "value", {
-            set : (value) => {
-                formatWidget._value = value;
-                let newWidgets = [];
-                const fullDef = formatWidget.options.fullvalues.find((w) => Array.isArray(w) ? w[0] === value : w === value);
-                if (!Array.isArray(fullDef)) {
-                    formatWidget._value = value;
-                } else {
-                    formatWidget._value = fullDef[0];
-                    for (let wDef of fullDef[1]) {
-                        //create widgets. Heavy borrowed from web/scripts/app.js
-                        //default implementation doesn't work since it automatically adds
-                        //the widget in the wrong spot.
-                        //TODO: consider letting this happen and just removing from list?
-                        let w = {};
-                        w.name = wDef[0];
-                        let inputData = wDef.slice(1);
-                        w.type = inputData[0];
-                        w.options = inputData[1] ? inputData[1] : {};
-                        if (Array.isArray(w.type)) {
-                            w.value = w.type[0];
-                            w.options.values = w.type;
-                            w.type = "combo";
-                        }
-                        if(inputData[1]?.default) {
-                            w.value = inputData[1].default;
-                        }
-                        if (w.type == "INT") {
-                            Object.assign(w.options, {"precision": 0, "step": 10})
-                            w.callback = function (v) {
-                                const s = this.options.step / 10;
-                                this.value = Math.round(v / s) * s;
-                            }
-                        }
-                        const typeTable = {BOOLEAN: "toggle", STRING: "text", INT: "number", FLOAT: "number"};
-                        if (w.type in typeTable) {
-                            w.type = typeTable[w.type];
-                        }
-                        newWidgets.push(w);
+        chainCallback(formatWidget, "callback", (value) => {
+            const formats = (LiteGraph.registered_node_types[this.type]
+                ?.nodeData?.input?.required?.format?.[1]?.formats)
+            let newWidgets = [];
+            if (formats?.[value]) {
+                let formatWidgets = formats[value]
+                for (let wDef of formatWidgets) {
+                    let type = wDef[2]?.widgetType ?? wDef[1]
+                    if (Array.isArray(type)) {
+                        type = "COMBO"
                     }
+                    app.widgets[type](this, wDef[0], wDef.slice(1), app)
+                    let w = this.widgets.pop()
+                    w.config = wDef.slice(1)
+                    newWidgets.push(w)
                 }
-                this.widgets.splice(formatWidgetIndex, formatWidgetsCount, ...newWidgets);
-                fitHeight(this);
-                formatWidgetsCount = newWidgets.length;
-            },
-            get : () => {
-                return formatWidget._value;
             }
+            let removed = this.widgets.splice(formatWidgetIndex,
+                                            formatWidgetsCount, ...newWidgets);
+            let newNames = new Set(newWidgets.map((w) => w.name))
+            for (let w of removed) {
+                w?.onRemove?.()
+                if (w.name in newNames) {
+                    continue
+                }
+                //I do not like the performance of this, but it's safe
+                let slot = this.inputs.findIndex((i) => i.name == w.name)
+                if (slot >= 0) {
+                    this.removeInput(slot)
+                }
+            }
+            for (let w of newWidgets) {
+                let existingInput = this.inputs.find((i) => i.name == w.name)
+                if (existingInput) {
+                    setWidgetConfig(existingInput, w.config)
+                    //TODO: Consider forcing disconnection if props change?
+                } else {
+                    //NOTE: config is applied in wrapped addInput call
+                    this.addInput(w.name, w.config[0], {widget: {name: w.name}})
+                }
+            }
+            fitHeight(this);
+            formatWidgetsCount = newWidgets.length;
         });
     });
 }
-function addLoadVideoCommon(nodeType, nodeData) {
-    addCustomSize(nodeType, nodeData, "force_size")
+function addLoadCommon(nodeType, nodeData) {
     addVideoPreview(nodeType);
+    initializeLoadFormat(nodeType, nodeData)
     addPreviewOptions(nodeType);
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
-        const pathWidget = this.widgets.find((w) => w.name === "video");
-        const frameCapWidget = this.widgets.find((w) => w.name === 'frame_load_cap');
-        const frameSkipWidget = this.widgets.find((w) => w.name === 'skip_first_frames');
-        const rateWidget = this.widgets.find((w) => w.name === 'force_rate');
-        const skipWidget = this.widgets.find((w) => w.name === 'select_every_nth');
-        const sizeWidget = this.widgets.find((w) => w.name === 'force_size');
         //widget.callback adds unused arguements which need culling
-        let update = function (value, _, node) {
-            let param = {}
-            param[this.name] = value
-            node?.updateParameters(param);
-        }
-        chainCallback(frameCapWidget, "callback", update);
-        chainCallback(frameSkipWidget, "callback", update);
-        chainCallback(rateWidget, "callback", update);
-        chainCallback(skipWidget, "callback", update);
-        let priorSize = sizeWidget.value;
-        let updateSize = function(value, _, node) {
-            if (sizeWidget.value == 'Custom' || priorSize != sizeWidget.value) {
-                node?.updateParameters({"force_size": sizeWidget.serializePreview()});
+        const node = this
+        function update(key) {
+            return function(value) {
+                let params = {}
+                params[key] = this.value
+                node?.updateParameters(params)
             }
-            priorSize = sizeWidget.value;
         }
-        chainCallback(sizeWidget, "callback", updateSize);
-        chainCallback(this.widgets.find((w) => w.name === "custom_width"), "callback", updateSize);
-        chainCallback(this.widgets.find((w) => w.name === "custom_height"), "callback", updateSize);
-
-        //do first load
-        requestAnimationFrame(() => {
-            for (let w of [frameCapWidget, frameSkipWidget, rateWidget, pathWidget, skipWidget]) {
-                w.callback(w.value, null, this);
+        let prior_ar = -2
+        const widthWidget = this.widgets.find((w) => w.name === "custom_width");
+        const heightWidget = this.widgets.find((w) => w.name === "custom_height");
+        function updateAR(value) {
+            let new_ar = -1
+            if (widthWidget.value & heightWidget.value) {
+                new_ar = widthWidget.value / heightWidget.value
             }
-        });
-    });
-}
-function addLoadImagesCommon(nodeType, nodeData) {
-    addVideoPreview(nodeType);
-    addPreviewOptions(nodeType);
-    chainCallback(nodeType.prototype, "onNodeCreated", function() {
-        const pathWidget = this.widgets.find((w) => w.name === "directory");
-        const frameCapWidget = this.widgets.find((w) => w.name === 'image_load_cap');
-        const frameSkipWidget = this.widgets.find((w) => w.name === 'skip_first_images');
-        const skipWidget = this.widgets.find((w) => w.name === 'select_every_nth');
-        //widget.callback adds unused arguements which need culling
-        let update = function (value, _, node) {
-            let param = {}
-            param[this.name] = value
-            node.updateParameters(param);
+            if (new_ar != prior_ar) {
+                node?.updateParameters({'custom_width': widthWidget.value,
+                    'custom_height': heightWidget.value})
+                prior_ar = new_ar
+            }
         }
-        chainCallback(frameCapWidget, "callback", (value, _, node) => {
-            node.updateParameters({frame_load_cap: value})
-        });
-        chainCallback(frameSkipWidget, "callback", update);
-        chainCallback(skipWidget, "callback", update);
-        //do first load
-        requestAnimationFrame(() => {
-            for (let w of [frameCapWidget, frameSkipWidget, pathWidget, skipWidget]) {
-                w.callback(w.value, null, this);
+        const offsetWidget = this.widgets.find((w) => w.name === "start_time");
+        if (offsetWidget) {
+            Object.defineProperty(offsetWidget.options, "step", {
+                set : (value) => {},
+                get : () => {
+                    return 1 / (this.video_query?.loaded?.fps ?? 1)
+                }
+            })
+        }
+        let widgetMap = {'frame_load_cap': 'frame_load_cap',
+            'skip_first_frames': 'skip_first_frames', 'select_every_nth': 'select_every_nth',
+            'start_time': 'start_time', 'force_rate': 'force_rate',
+            'custom_width': updateAR, 'custom_height': updateAR,
+            'image_load_cap': 'image_load_cap', 'skip_first_images': 'skip_first_images'
+        }
+        for (let widget of this.widgets) {
+            if (widget.name in widgetMap) {
+                if (typeof(widgetMap[widget.name]) == 'function') {
+                    chainCallback(widget, "callback", widgetMap[widget.name]);
+                } else {
+                    chainCallback(widget, "callback", update(widgetMap[widget.name]))
+                }
             }
-        });
+            if (widget.type != "button") {
+                widget.callback?.(widget.value)
+            }
+        }
     });
 }
 
@@ -1259,10 +1472,13 @@ function searchBox(event, [x,y], node) {
             if (extensions) {
                 params.extensions = extensions
             }
-            let optionsURL = api.apiURL('/getpath?' + new URLSearchParams(params));
+            let optionsURL = api.apiURL('/vhs/getpath?' + new URLSearchParams(params));
             try {
                 let resp = await fetch(optionsURL);
                 options = await resp.json();
+                options = options.map((o) => o.replace('.','\0'))
+                options = options.sort()
+                options = options.map((o) => o.replace('\0','.'))
             } catch(e) {
                 options = []
             }
@@ -1285,22 +1501,372 @@ function searchBox(event, [x,y], node) {
 
     return dialog;
 }
+function button_action(widget) {
+  if (
+    widget.options?.reset == undefined &&
+    widget.options?.disable == undefined
+  ) {
+    return 'None'
+  }
+  if (
+    widget.options.reset != undefined &&
+    widget.value != widget.options.reset
+  ) {
+    return 'Reset'
+  }
+  if (
+    widget.options.disable != undefined &&
+    widget.value != widget.options.disable
+  ) {
+    return 'Disable'
+  }
+  if (widget.options.reset != undefined) {
+    return 'No Reset'
+  }
+  return 'No Disable'
+}
+function fitText(ctx, text, maxLength) {
+    if (maxLength <= 0) {
+        return ['', 0]
+    }
+    let fullLength = ctx.measureText(text).width
+    if (fullLength < maxLength) {
+        return [text, fullLength]
+    }
+    //determine approx safe cutoff
+    let cutoff = maxLength / fullLength * text.length | 0
+    let shortened = text.slice(0, Math.max(0, cutoff - 2)) + '…'
+    return [shortened, ctx.measureText(shortened).width]
+}
+function fitPath(ctx, path, maxLength) {
+    let fullLength = ctx.measureText(path).width
+    if (fullLength < maxLength) {
+        return [path, fullLength]
+    }
+    //determine approx safe cutoff
+    let len = (maxLength / fullLength * path.length | 0) - 1
 
-app.ui.settings.addSetting({
-    id: "VHS.AdvancedPreviews",
-    name: "🎥🅥🅗🅢 Advanced Previews",
-    type: "boolean",
-    defaultValue: false,
-});
-app.ui.settings.addSetting({
-    id: "VHS.DefaultMute",
-    name: "🎥🅥🅗🅢 Mute videos by default",
-    type: "boolean",
-    defaultValue: false,
-});
+    let displayPath = ''
+    let filename = path_stem(path)[1]
+    if (filename.length > len-2) {
+        //may all fit, but can't squeeze more info
+         displayPath = filename.substr(0,len);
+    } else {
+        //TODO: find solution for windows, path[1] == ':'?
+        let isAbs = path[0] == '/';
+        let partial = path.substr(path.length - (isAbs ? len-2:len-1))
+        let cutoff = partial.indexOf('/');
+        if (cutoff < 0) {
+            //Can occur, but there isn't a nicer way to format
+            displayPath = path.substr(path.length-len);
+        } else {
+            displayPath = (isAbs ? '/…':'…') + partial.substr(cutoff);
+        }
+    }
+    return [displayPath, ctx.measureText(displayPath).width]
+}
+function roundToPrecision(num, precision) {
+    let strnum = Number(num).toFixed(precision)
+    let deci = strnum.indexOf('.')
+    if (deci > 0) {
+        let i = strnum.length - 1
+        while (i > deci && strnum[i] == '0') {
+            i--
+        }
+        if (i == deci) {
+            i--
+        }
+        return strnum.slice(0, i+1)
+    }
+    return strnum
+}
+function inner_value_change(widget, value, node, pos) {
+  widget.value = value
+  if (widget.options?.property && widget.options.property in node.properties) {
+    node.setProperty(widget.options.property, value)
+  }
+  if (widget.callback) {
+    widget.callback(widget.value, app.canvas, node, event)
+  }
+}
+function drawAnnotated(ctx, node, widget_width, y, H) {
+  const litegraph_base = LiteGraph
+  const show_text = app.canvas.ds.scale >= (app.canvas.low_quality_zoom_threshold ?? 0.5)
+  const margin = 15
+  ctx.strokeStyle = litegraph_base.WIDGET_OUTLINE_COLOR
+  ctx.fillStyle = litegraph_base.WIDGET_BGCOLOR
+  ctx.beginPath()
+  if (show_text)
+    ctx.roundRect(margin, y, widget_width - margin * 2, H, [H * 0.5])
+  else ctx.rect(margin, y, widget_width - margin * 2, H)
+  ctx.fill()
+  if (show_text) {
+    if (!this.disabled) ctx.stroke()
+    const button = button_action(this)
+    if (button != 'None') {
+      ctx.save()
+      if (button.startsWith('No ')) {
+        ctx.fillStyle = litegraph_base.WIDGET_OUTLINE_COLOR
+        ctx.strokeStyle = litegraph_base.WIDGET_OUTLINE_COLOR
+      } else {
+        ctx.fillStyle = litegraph_base.WIDGET_TEXT_COLOR
+        ctx.strokeStyle = litegraph_base.WIDGET_TEXT_COLOR
+      }
+      ctx.beginPath()
+      if (button.endsWith('Reset')) {
+        ctx.arc(widget_width - margin - 26, y + H/2, 4, Math.PI*3/2, Math.PI)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.moveTo(widget_width - margin - 26, y + H/2 - 1.5)
+        ctx.lineTo(widget_width - margin - 26, y + H/2 - 6.5)
+        ctx.lineTo(widget_width - margin - 30, y + H/2 - 3.5)
+        ctx.fill()
+      } else {
+        ctx.arc(widget_width - margin - 26, y + H/2, 4, Math.PI*2/3, Math.PI*8/3)
+        ctx.moveTo(widget_width - margin - 26 - 8 ** .5, y + H/2 + 8 ** .5)
+        ctx.lineTo(widget_width - margin - 26 + 8 ** .5, y + H/2 - 8 ** .5)
+        ctx.stroke()
+      }
+      ctx.restore()
+    }
+    ctx.fillStyle = litegraph_base.WIDGET_TEXT_COLOR
+    if (!this.disabled) {
+      ctx.beginPath()
+      ctx.moveTo(margin + 16, y + 5)
+      ctx.lineTo(margin + 6, y + H * 0.5)
+      ctx.lineTo(margin + 16, y + H - 5)
+      ctx.fill()
+      ctx.beginPath()
+      ctx.moveTo(widget_width - margin - 16, y + 5)
+      ctx.lineTo(widget_width - margin - 6, y + H * 0.5)
+      ctx.lineTo(widget_width - margin - 16, y + H - 5)
+      ctx.fill()
+    }
+    let freeWidth = widget_width - (40 + margin * 2 + 20)
+    let [valueText, valueWidth] = fitText(ctx, (this.displayValue?.() ?? ""), freeWidth)
+    freeWidth -= valueWidth
 
+    ctx.textAlign = 'left'
+    ctx.fillStyle = litegraph_base.WIDGET_SECONDARY_TEXT_COLOR
+    if (freeWidth > 20) {
+      let [name, nameWidth] = fitText(ctx, this.label || this.name, freeWidth)
+      freeWidth -= nameWidth
+      ctx.fillText(name, margin * 2 + 5, y + H * 0.7)
+    }
+
+    let value_offset = margin * 2 + 20
+    ctx.textAlign = 'right'
+    if (this.options.unit) {
+      ctx.fillStyle = litegraph_base.WIDGET_OUTLINE_COLOR
+      let [unitText, unitWidth] = fitText(ctx, this.options.unit, freeWidth)
+      if (unitText == this.options.unit) {
+        ctx.fillText(this.options.unit, widget_width - value_offset, y + H * 0.7)
+        value_offset += unitWidth
+        freeWidth -= unitWidth
+      }
+    }
+    ctx.fillStyle = litegraph_base.WIDGET_TEXT_COLOR
+    ctx.fillText(valueText, widget_width - value_offset, y + H * 0.7)
+    ctx.fillStyle = litegraph_base.WIDGET_SECONDARY_TEXT_COLOR
+
+
+    let annotation = ''
+    if (this.annotation) {
+      annotation = this.annotation(this.value, freeWidth)
+    } else if (
+      this.options.annotation &&
+      this.value in this.options.annotation
+    ) {
+      annotation = this.options.annotation[this.value]
+    }
+    if (annotation) {
+      ctx.fillStyle = litegraph_base.WIDGET_OUTLINE_COLOR
+      let [annoDisplay, annoWidth] = fitText(ctx, annotation, freeWidth)
+      ctx.fillText(
+        annoDisplay,
+        widget_width - 5 - valueWidth - value_offset,
+        y + H * 0.7
+      )
+    }
+  }
+}
+function mouseAnnotated(event, [x, y], node) {
+    //NOTE: Mouse actions contain no history element.
+    //This can cause overlapping actions since each triggers on different event type (down/move/up)
+    //TODO: Consider further rework
+    const widget_width = this.width || node.size[0]
+    const old_value = this.value
+    const margin = 15
+    let isButton = 0
+    if (x > margin + 6 && x < margin + 16) {
+        isButton = -1
+    } else if (x > widget_width - margin - 16 & x < widget_width - margin - 6) {
+        isButton = 1
+    } else if (x > widget_width - margin - 34 && x < widget_width - margin - 18) {
+        isButton = 2
+    }
+    var allow_scroll = true
+    if (allow_scroll && event.type == 'pointermove') {
+        if (event.deltaX)
+            this.value += event.deltaX * (this.options.step || 1)
+        if (this.options.min != null && this.value < this.options.min) {
+            this.value = this.options.min
+        }
+        if (this.options.max != null && this.value > this.options.max) {
+            this.value = this.options.max
+        }
+    } else if (event.type == 'pointerdown') {
+        const buttonType = button_action(this)
+        if (isButton == 2) {
+            if (buttonType == 'Reset') {
+                this.value = this.options.reset
+            } else if (buttonType == 'Disable') {
+                this.value = this.options.disable
+            }
+        } else {
+            this.value += isButton * (this.options.step || 1)
+            if (this.options.min != null && this.value < this.options.min) {
+                this.value = this.options.min
+            }
+            if (this.options.max != null && this.value > this.options.max) {
+                this.value = this.options.max
+            }
+        }
+    } //end mousedown
+    else if (event.type == 'pointerup') {
+        if (event.click_time < 200 && !isButton) {
+            const d_callback = (v) => {
+                this.value = this.parseValue?.(v) ?? Number(v)
+                inner_value_change(this, this.value, node, [x, y])
+            }
+            const dialog = app.canvas.prompt(
+                'Value',
+                this.value,//TODO: Consider making this displayValue?
+                d_callback,
+                event
+            )
+            const input = dialog.querySelector(".value")
+            input.addEventListener("keydown", (e) => {
+                if (e.keyCode == 9) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    d_callback(input.value)
+                    dialog.close()
+                    node?.graph?.setDirtyCanvas(true);
+                    let i = node.widgets.findIndex((w) => w == this)
+                    if (e.shiftKey)
+                        i--
+                    else
+                        i++
+                    if (node.widgets[i]?.type == "VHS.ANNOTATED") {//restrict to annotatedNUmbers
+                        node.widgets[i]?.mouse(event, [x, y+24], node)
+                    }
+                }
+            })
+        }
+    }
+
+    if (old_value != this.value)
+        setTimeout(
+            function () {
+                inner_value_change(this, this.value, node, [x, y])
+            }.bind(this),
+            20
+        )
+    return true
+}
+let latentPreviewNodes = new Set()
 app.registerExtension({
     name: "VideoHelperSuite.Core",
+    settings: [
+      {
+        id: 'VHS.AdvancedPreviews',
+        category: ['🎥🅥🅗🅢', 'Previews', 'Advanced Previews'],
+        name: 'Advanced Previews',
+        tooltip: 'Automatically transcode previews on request. Required for advanced functionality',
+        type: 'combo',
+        options: ['Never', 'Always', 'Input Only'],
+        defaultValue: 'Input Only',
+      },
+      {
+        id: 'VHS.AdvancedPreviewsMinWidth',
+        category: ['🎥🅥🅗🅢', 'Previews', 'Min Width'],
+        name: 'Minimum preview width',
+        tooltip: 'Advanced previews have their resolution downscaled to the node size for performance. While a node can be resized to increase preview quality, a minimum width can be set that previews won\'t be downscaled beneath. Preveiws will never be upscaled, so this can safely be set large.',
+        type: 'number',
+        attrs: {
+          min: 0,
+          step: 1,
+          max: 3840,
+        },
+        defaultValue: 0,
+      },
+      {
+        id: 'VHS.AdvancedPreviewsDeadline',
+        category: ['🎥🅥🅗🅢', 'Previews', 'Deadline'],
+        name: 'Deadline',
+        tooltip: 'Determines how much time can be spent when encoding advanced previews. Realtime results in reduced quality, but good will likely cause the preview to stutter as initial generation occurs',
+        type: 'combo',
+        options: ['realtime', 'good'],
+        defaultValue: 'realtime',
+      },
+      {
+        id: 'VHS.AdvancedPreviewsDefaultMute',
+        category: ['🎥🅥🅗🅢', 'Previews', 'Default Mute'],
+        name: 'Mute videos by default',
+        type: 'boolean',
+        defaultValue: false,
+      },
+      {
+        id: 'VHS.LatentPreview',
+        category: ['🎥🅥🅗🅢', 'Sampling', 'Latent Previews'],
+        name: 'Display animated previews when sampling',
+        type: 'boolean',
+        defaultValue: false,
+        onChange(value) {
+            if (!value) {
+                //Remove any previewWidgets
+                for (let id of latentPreviewNodes) {
+                    let n = app.graph.getNodeById(id)
+                    let i = n?.widgets?.findIndex((w) => w.name == 'vhslatentpreview')
+                    if (i >= 0) {
+                        n.widgets.splice(i,1)[0].onRemove()
+                    }
+                }
+                latentPreviewNodes = new Set()
+            }
+        },
+      },
+      {
+        id: "VHS.LatentPreviewRate",
+        category: ['🎥🅥🅗🅢', 'Sampling', 'Latent Preview Rate'],
+        name: "Playback rate override.",
+        type: 'number',
+        attrs: {
+          min: 0,
+          step: 1,
+          max: 60
+        },
+        tooltip:
+          'Force a specific frame rate for the playback of latent frames. This should not be confused with the output frame rate and will not match for video models.',
+        defaultValue: 0,
+      },
+      {
+        id: 'VHS.MetadataImage',
+        category: ['🎥🅥🅗🅢', 'Output', 'MetadataImage'],
+        name: 'Save png of first frame for metadata',
+        type: 'boolean',
+        defaultValue: true,
+      },
+      {
+        id: 'VHS.KeepIntermediate',
+        category: ['🎥🅥🅗🅢', 'Output', 'Keep Intermediate'],
+        name: 'Keep required intermediate files after sucessful execution',
+        type: 'boolean',
+        defaultValue: true,
+      },
+    ],
+
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if(nodeData?.name?.startsWith("VHS_")) {
             useKVState(nodeType);
@@ -1321,6 +1887,15 @@ app.registerExtension({
                     this.setSize(this.computeSize())
                 })
             }
+            //set widgetType to use VHS widgets where possible
+            for(let inp of Object.values({...nodeData.input?.required, ...nodeData.input?.optional})) {
+                if (["INT", "FLOAT"].includes(inp[0])) {
+                    if (!inp[1]) {
+                        inp[1] = {}
+                    }
+                    inp[1].widgetType ??= "VHS" + inp[0]
+                }
+            }
             chainCallback(nodeType.prototype, "onNodeCreated", function () {
                 let new_widgets = []
                 if (this.widgets) {
@@ -1338,6 +1913,22 @@ app.registerExtension({
                     }
                     this.widgets = new_widgets;
                 }
+                const originalAddInput = this.addInput;
+                this.addInput = function(name, type, options) {
+                    if (options.widget) {
+                        //Is Converted Widget
+                        const widget = this.widgets.find((w) => w.name == name)
+                        if (widget?.config) {
+                            //Has override for type
+                            type = widget.config[0]
+                            if (type == 'FLOAT') {
+                                type = "FLOAT,INT"
+                            }
+                            setWidgetConfig(options, widget.config)
+                        }
+                    }
+                    return originalAddInput.apply(this, [name, type, options])
+                }
             });
         }
         if (nodeData?.name == "VHS_LoadImages") {
@@ -1352,9 +1943,8 @@ app.registerExtension({
                     this.updateParameters(params, true);
                 });
             });
-            addLoadImagesCommon(nodeType, nodeData);
+            addLoadCommon(nodeType, nodeData);
         } else if (nodeData?.name == "VHS_LoadImagesPath") {
-            addUploadWidget(nodeType, nodeData, "directory", "folder");
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
                 const pathWidget = this.widgets.find((w) => w.name === "directory");
                 chainCallback(pathWidget, "callback", (value) => {
@@ -1365,9 +1955,8 @@ app.registerExtension({
                     this.updateParameters(params, true);
                 });
             });
-            addLoadImagesCommon(nodeType, nodeData);
-        } else if (nodeData?.name == "VHS_LoadVideo") {
-            addUploadWidget(nodeType, nodeData, "video");
+            addLoadCommon(nodeType, nodeData);
+        } else if (nodeData?.name == "VHS_LoadVideo" || nodeData?.name == "VHS_LoadVideoFFmpeg") {
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
                 const pathWidget = this.widgets.find((w) => w.name === "video");
                 chainCallback(pathWidget, "callback", (value) => {
@@ -1386,15 +1975,29 @@ app.registerExtension({
                     this.updateParameters(params, true);
                 });
             });
-            addLoadVideoCommon(nodeType, nodeData);
+            addUploadWidget(nodeType, nodeData, "video");
+            addLoadCommon(nodeType, nodeData);
             addVAEOutputToggle(nodeType, nodeData);
-            applyVHSAudioLinksFix(nodeType, nodeData, 2)
+        } else if (nodeData?.name == "VHS_LoadAudio") {
+            addAudioPreview(nodeType)
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                const pathWidget = this.widgets.find((w) => w.name === "audio_file");
+                chainCallback(pathWidget, "callback", (filename) => {
+                    this.updateParameters({filename, type: 'path'}, true);
+                });
+            });
         } else if (nodeData?.name == "VHS_LoadAudioUpload") {
             addUploadWidget(nodeType, nodeData, "audio", "audio");
-            applyVHSAudioLinksFix(nodeType, nodeData, 0)
-        } else if (nodeData?.name == "VHS_LoadAudio"){
-            applyVHSAudioLinksFix(nodeType, nodeData, 0)
-        } else if (nodeData?.name =="VHS_LoadVideoPath") {
+            addAudioPreview(nodeType)
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                const pathWidget = this.widgets.find((w) => w.name === "audio");
+                chainCallback(pathWidget, "callback", (filename) => {
+                    if (!filename) return
+                    let params = {filename, type : "input"};
+                    this.updateParameters(params, true);
+                });
+            });
+        } else if (nodeData?.name == "VHS_LoadVideoPath" || nodeData?.name == "VHS_LoadVideoFFmpegPath") {
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
                 const pathWidget = this.widgets.find((w) => w.name === "video");
                 chainCallback(pathWidget, "callback", (value) => {
@@ -1406,12 +2009,24 @@ app.registerExtension({
                     }
                     format += "/" + extension;
                     let params = {filename : value, type: "path", format: format};
-                    this?.updateParameters(params, true);
+                    this.updateParameters(params, true);
                 });
             });
-            addLoadVideoCommon(nodeType, nodeData);
+            addLoadCommon(nodeType, nodeData);
             addVAEOutputToggle(nodeType, nodeData);
-            applyVHSAudioLinksFix(nodeType, nodeData, 2)
+        } else if (nodeData?.name == "VHS_LoadImagePath") {
+            addLoadCommon(nodeType, nodeData);
+            addVAEOutputToggle(nodeType, nodeData);
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                const pathWidget = this.widgets.find((w) => w.name === "image");
+                chainCallback(pathWidget, "callback", (value) => {
+                    let extension_index = value.lastIndexOf(".");
+                    let extension = value.slice(extension_index+1);
+                    let format = "video" +  "/" + extension;
+                    let params = {filename : value, type: "path", format: format};
+                    this.updateParameters(params, true);
+                });
+            });
         } else if (nodeData?.name == "VHS_VideoCombine") {
             addDateFormatting(nodeType, "filename_prefix");
             chainCallback(nodeType.prototype, "onExecuted", function(message) {
@@ -1419,29 +2034,10 @@ app.registerExtension({
                     this.updateParameters(message.gifs[0], true);
                 }
             });
-            addVideoPreview(nodeType);
+            addVideoPreview(nodeType, false);
             addPreviewOptions(nodeType);
-            addFormatWidgets(nodeType);
+            addFormatWidgets(nodeType, nodeData);
             addVAEInputToggle(nodeType, nodeData)
-
-            chainCallback(nodeType.prototype, "onNodeCreated", function() {
-                this._outputs = this.outputs
-                Object.defineProperty(this, "outputs", {
-                    set : function(value) {
-                        this._outputs = value;
-                        requestAnimationFrame(() => {
-                            if (app.nodeOutputs[this.id + ""]) {
-                                this.updateParameters(app.nodeOutputs[this.id+""].gifs[0], true);
-                            }
-                        })
-                    },
-                    get : function() {
-                        return this._outputs;
-                    }
-                });
-                //Display previews after reload/ loading workflow
-                requestAnimationFrame(() => {this.updateParameters({}, true);});
-            });
         } else if (nodeData?.name == "VHS_SaveImageSequence") {
             //Disabled for safety as VHS_SaveImageSequence is not currently merged
             //addDateFormating(nodeType, "directory_name", timestamp_widget=true);
@@ -1454,6 +2050,78 @@ app.registerExtension({
             });
         } else if (nodeData?.name == "VHS_Unbatch") {
             cloneType(nodeType, nodeData)
+        } else if (nodeData?.name == "VHS_SelectLatest") {
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                this.isVirtualNode = true
+                chainCallback(this, "onConnectionsChange", function (contype, slot, iscon, linfo) {
+                    if (iscon) {
+                        this.update_links()
+                    }
+                })
+
+                this.update_links = function(extraLinks = []) {
+                    if (!this.outputs[0].links?.length) return
+
+                    function get_links(node) {
+                        let links = []
+                        for (const l of node.outputs[0].links) {
+                            const linkInfo = this.graph.links[l]
+                            const n = node.graph.getNodeById(linkInfo.target_id)
+                            if (n.type == 'Reroute') {
+                                links = links.concat(get_links(n))
+                            } else {
+                                links.push(l)
+                            }
+                        }
+                        return links
+                    }
+
+                    let links = [
+                        ...get_links(this).map((l) => this.graph.links[l]),
+                        ...extraLinks
+                    ]
+                    let v = this.latest_file
+                    if (!v) {
+                        return
+                    }
+
+                    // For each output link copy our value over the original widget value
+                    for (const linkInfo of links) {
+                        const node = this.graph.getNodeById(linkInfo.target_id)
+                        const input = node.inputs[linkInfo.target_slot]
+                        const widgetName = input.widget.name
+                        const widget = node.widgets.find((w) => w.name === widgetName)
+                        if (widget) {
+                            widget.value = v
+                            if (widget.callback) {
+                                widget.callback( widget.value, app.canvas,
+                                    node, app.canvas.graph_mouse, {})
+                            }
+                        }
+                    }
+                }
+                let fetch_files = async () => {
+                    let [path, remainder] = path_stem(this.widgets[0].value)
+                    let params = {path : path}
+                    let optionsURL = api.apiURL('/vhs/getpath?' + new URLSearchParams(params));
+                    let options
+                    try {
+                        let resp = await fetch(optionsURL);
+                        options = await resp.json();
+                    } catch(e) {
+                        options = []
+                    }
+                    options = options.filter((file) => file.startsWith(remainder) && file.endsWith(this.widgets[1].value))
+                    if (options.length && this.latest_file != options[options.length-1]) {
+                        this.latest_file = path + options[options.length-1]
+                        this.update_links()
+                    }
+                }
+                this.widgets[0].callback = fetch_files
+                this.widgets[1].callback = fetch_files
+                this.onPromptExecuted  = fetch_files
+                this.applyToGraph = this.update_links
+            })
         }
     },
     async getCustomWidgets() {
@@ -1465,7 +2133,7 @@ app.registerExtension({
                     value : "",
                     draw : function(ctx, node, widget_width, y, H) {
                         //Adapted from litegraph.core.js:drawNodeWidgets
-                        var show_text = app.canvas.ds.scale > 0.5;
+                        var show_text = app.canvas.ds.scale >= (app.canvas.low_quality_zoom_threshold ?? 0.5)
                         var margin = 15;
                         var text_color = LiteGraph.WIDGET_TEXT_COLOR;
                         var secondary_text_color = LiteGraph.WIDGET_SECONDARY_TEXT_COLOR;
@@ -1487,41 +2155,23 @@ app.registerExtension({
                             ctx.clip();
 
                             //ctx.stroke();
+                            let freeWidth = widget_width - (margin * 2 + 40)
                             ctx.fillStyle = secondary_text_color;
                             const label = this.label || this.name;
                             if (label != null) {
-                                ctx.fillText(label, margin * 2, y + H * 0.7);
+                                let [labelDisplay, labelWidth] = fitText(ctx, label, freeWidth)
+                                freeWidth -= labelWidth
+                                ctx.fillText(labelDisplay, margin * 2, y + H * 0.7);
                             }
                             ctx.fillStyle = this.value ? text_color : '#777';
                             ctx.textAlign = "right";
-                            let disp_text = this.format_path(String(this.value || this.options.placeholder))
-                            ctx.fillText(disp_text, widget_width - margin * 2, y + H * 0.7); //30 chars max
+                            let disp_text = fitPath(ctx, String(this.value || this.options.placeholder), freeWidth)[0]
+                            ctx.fillText(disp_text, widget_width - margin * 2, y + H * 0.7);
                             ctx.restore();
                         }
                     },
                     mouse : searchBox,
                     options : {},
-                    format_path : function(path) {
-                        //Formats the full path to be under 30 characters
-                        if (path.length <= 30) {
-                            return path;
-                        }
-                        let filename = path_stem(path)[1]
-                        if (filename.length > 28) {
-                            //may all fit, but can't squeeze more info
-                            return filename.substr(0,30);
-                        }
-                        //TODO: find solution for windows, path[1] == ':'?
-                        let isAbs = path[0] == '/';
-                        let partial = path.substr(path.length - (isAbs ? 28:29))
-                        let cutoff = partial.indexOf('/');
-                        if (cutoff < 0) {
-                            //Can occur, but there isn't a nicer way to format
-                            return path.substr(path.length-30);
-                        }
-                        return (isAbs ? '/…':'…') + partial.substr(cutoff);
-
-                    }
                 };
                 if (inputData.length > 1) {
                     w.options = inputData[1]
@@ -1535,7 +2185,131 @@ app.registerExtension({
                 }
                 node.widgets.push(w);
                 return w;
-            }
+            },
+            VHSFLOAT(node, inputName, inputData) {
+                let w = {
+                    name: inputName,
+                    type: "VHS.ANNOTATED",
+                    value: inputData[1]?.default ?? 0,
+                    draw: drawAnnotated,
+                    mouse: mouseAnnotated,
+                    computeSize(width) {
+                        return [width, 20]
+                    },
+                    callback(v) {
+                        if (this.options.round) {
+                            //TODO adopt ComfyUI_frontend#4291?
+                            v = Math.round((v + Number.EPSILON) /
+                                this.options.round) * this.options.round
+                        }
+                        if (this.options.max && v > this.options.max) {
+                            v = this.options.max
+                        }
+                        if (this.options.min && v < this.options.max) {
+                            v = this.options.min
+                        }
+                        this.value = v
+                    },
+                    config: inputData,
+                    displayValue: function() {
+                        return roundToPrecision(this.value, this.options.precision ?? 3)
+                    },
+                    options: Object.assign({},  inputData[1])
+                }
+                if (!node.widgets) {
+                    node.widgets = []
+                }
+                node.widgets.push(w)
+                return w
+            },
+            VHSINT(node, inputName, inputData) {
+                let w = {
+                    name: inputName,
+                    type: "VHS.ANNOTATED",
+                    value: inputData[1]?.default ?? 0,
+                    draw: drawAnnotated,
+                    mouse: mouseAnnotated,
+                    computeSize(width) {
+                        return [width, 20]
+                    },
+                    callback(v) {
+                        if (this.options.max && v > this.options.max) {
+                            v = this.options.max
+                        }
+                        if (this.options.min && v < this.options.min) {
+                            v = this.options.min
+                        }
+                        if (v == 0) {
+                            return
+                        }
+                        const s = this.options.step
+                        let sh = this.options.mod ?? 0
+                        this.value = Math.round((v - sh) / s) * s + sh
+                    },
+                    config: inputData,
+                    displayValue: function() {
+                        return this.value | 0
+                    },
+                    options: Object.assign({},  inputData[1])
+                }
+                if (!node.widgets) {
+                    node.widgets = []
+                }
+                node.widgets.push(w)
+                return w
+            },
+            VHSTIMESTAMP(node, inputName, inputData) {
+                let w = {
+                    name: inputName,
+                    type: "VHS.TIMESTAMP",
+                    value: inputData[1]?.default ?? 0,
+                    draw: drawAnnotated,
+                    mouse: mouseAnnotated,
+                    computeSize(width) {
+                        return [width, 20]
+                    },
+                    parseValue(v) {
+                        if (typeof(v) == "string") {
+                            let val = 0
+                            for (let chunk of  v.split(":")) {
+                                val = val * 60 + parseFloat(chunk)
+                            }
+                            return val
+                        }
+                    },
+                    callback(v) {},
+                    config: inputData,
+                    options: Object.assign({}, inputData[1]),
+                    displayValue() {
+                        let seconds = this.value
+                        let hours = seconds / 3600 | 0
+                        seconds -= 3600 * hours
+                        let minutes = seconds / 60 | 0
+                        seconds -= 60 * minutes
+                        let display = ""
+                        if (hours > 0) {
+                            display += hours + ":"
+                        }
+                        if (hours > 0 || minutes > 0) {
+                            if (hours > 0) {
+                                minutes = (''+minutes).padStart(2,'0')
+                            }
+                            display += minutes + ":"
+                        }
+                        seconds = roundToPrecision(seconds, 4)
+                        if ((seconds[1] == '.' || seconds.length == 1) && (minutes > 0 || hours > 0)) {
+                            seconds = '0'+seconds
+                        }
+                        display += seconds
+                        return display
+                    }
+                }
+                if (!node.widgets) {
+                    node.widgets = []
+                }
+                node.widgets.push(w)
+                return w
+            },
         }
     },
     async loadedGraphNode(node) {
@@ -1553,23 +2327,73 @@ app.registerExtension({
         }
     },
     async setup() {
-        //cg-use-everywhere link workaround
-        //particularly invasive, plan to remove
         let originalGraphToPrompt = app.graphToPrompt
         let graphToPrompt = async function() {
             let res = await originalGraphToPrompt.apply(this, arguments);
-            for (let n of app.graph._nodes) {
-                if (n?.type?.startsWith('VHS_LoadVideo')) {
-                    if (!n?.inputs[1]?.link && res?.output[n.id]?.inputs?.vae) {
-                        delete res.output[n.id].inputs.vae
-                    }
-                }
-            }
+            res.workflow.extra['VHS_latentpreview'] = app.ui.settings.getSettingValue("VHS.LatentPreview")
+            res.workflow.extra['VHS_latentpreviewrate'] = app.ui.settings.getSettingValue("VHS.LatentPreviewRate")
+            res.workflow.extra['VHS_MetadataImage'] = app.ui.settings.getSettingValue("VHS.MetadataImage")
+            res.workflow.extra['VHS_KeepIntermediate'] = app.ui.settings.getSettingValue("VHS.KeepIntermediate")
             return res
         }
         app.graphToPrompt = graphToPrompt
+        //Add a handler for pasting video data
+        document.addEventListener('paste', async (e) => {
+            if (!e.target.classList.contains('litegraph') &&
+                !e.target.classList.contains('graph-canvas-container')) {
+                    return
+                }
+            let data = e.clipboardData || window.clipboardData
+            let filepath = data.getData('text/plain')
+            let video
+            for (const item of data.items) {
+                if (item.type.startsWith('video/')) {
+                    video = item
+                    break
+                }
+            }
+            if (filepath && copiedPath == filepath) {
+                //Add a Load Video (Path) and populate filepath
+                const pastedNode = LiteGraph.createNode('VHS_LoadVideoPath')
+                app.canvas.graph.add(pastedNode)
+                pastedNode.pos[0] = app.canvas.graph_mouse[0]
+                pastedNode.pos[1] = app.canvas.graph_mouse[1]
+                pastedNode.widgets[0].value = filepath
+                pastedNode.widgets[0].callback?.(filepath)
+            } else if (video && false) {
+                //Disabled due to lack of testing
+                //Add a Load Video (Upload), then upload the file, then select the file
+                const pastedNode = LiteGraph.createNode('VHS_LoadVideo')
+                app.canvas.graph.add(pastedNode)
+                pastedNode.pos[0] = app.canvas.graph_mouse[0]
+                pastedNode.pos[1] = app.canvas.graph_mouse[1]
+                const pathWidget = pastedNode.widgets[0]
+                //TODO: upload to pasted dir?
+                const blob = video.getAsFile()
+                const resp = await uploadFile(blob)
+                if (resp.status != 200) {
+                    //upload failed and file can not be added to options
+                    return;
+                }
+                const filename = (await resp.json()).name;
+                pathWidget.options.values.push(filename);
+                pathWidget.value = filename;
+                pathWidget.callback?.(filename)
+            } else {
+                return
+            }
+            e.preventDefault()
+            e.stopImmediatePropagation()
+            return false
+        }, true)
     },
     async init() {
+        if (app.ui.settings.getSettingValue("VHS.AdvancedPreviews") == true) {
+            app.ui.settings.setSettingValue("VHS.AdvancedPreviews", 'Always')
+        }
+        if (app.ui.settings.getSettingValue("VHS.AdvancedPreviews") == false) {
+            app.ui.settings.setSettingValue("VHS.AdvancedPreviews", 'Never')
+        }
         if (app.VHSHelp != helpDOM) {
             helpDOM = app.VHSHelp
         } else {
@@ -1584,6 +2408,131 @@ app.registerExtension({
                 }
             }
         }
-
     },
 });
+let previewImages = []
+api.addEventListener('executing', ({ detail }) => {
+    if (detail === null) {
+        for (let graph of [app.graph, ...app.graph.subgraphs.values()]) {
+            for (let node of graph._nodes) {
+                if (node.type.startsWith("VHS_")) {
+                    node.onPromptExecuted?.()
+                }
+            }
+        }
+    }
+})
+function getLatentPreviewCtx(id, width, height) {
+    const node = getNodeById(id)
+    if (!node) {
+        return undefined
+    }
+
+    let previewWidget = node.widgets.find((w) => w.name == "vhslatentpreview")
+    if (!previewWidget) {
+        let canvasEl = document.createElement("canvas")
+        previewWidget = node.addDOMWidget("vhslatentpreview", "vhscanvas", canvasEl, {
+            serialize: false,
+            hideOnZoom: false,
+        });
+        previewWidget.serialize = false
+        allowDragFromWidget(previewWidget)
+        canvasEl.addEventListener('contextmenu', (e)  => {
+            e.preventDefault()
+            return app.canvas._mousedown_callback(e)
+        }, true);
+        canvasEl.addEventListener('pointerdown', (e)  => {
+            e.preventDefault()
+            return app.canvas._mousedown_callback(e)
+        }, true);
+        canvasEl.addEventListener('mousewheel', (e)  => {
+            e.preventDefault()
+            return app.canvas._mousewheel_callback(e)
+        }, true);
+        canvasEl.addEventListener('pointermove', (e)  => {
+            e.preventDefault()
+            return app.canvas._mousemove_callback(e)
+        }, true);
+        canvasEl.addEventListener('pointerup', (e)  => {
+            e.preventDefault()
+            return app.canvas._mouseup_callback(e)
+        }, true);
+
+        previewWidget.computeSize = function(width) {
+            if (this.aspectRatio) {
+                let height = (node.size[0]-20)/ this.aspectRatio + 10;
+                if (!(height > 0)) {
+                    height = 0;
+                }
+                this.computedHeight = height + 10;
+                return [width, height];
+            }
+            return [width, -4];//no loaded src, widget should not display
+        }
+    }
+    let canvasEl = previewWidget.element
+    if (!previewWidget.ctx || canvasEl.width != width
+        || canvasEl.height != height) {
+        previewWidget.aspectRatio = width / height
+        canvasEl.width = width
+        canvasEl.height = height
+        fitHeight(node)
+    }
+    return canvasEl.getContext("2d")
+}
+let animateIntervals = {}
+function beginLatentPreview(id, previewImages, rate) {
+    latentPreviewNodes.add(id)
+    if (animateIntervals[id]) {
+        clearTimeout(animateIntervals[id])
+    }
+    let displayIndex = 0
+    let node = getNodeById(id)
+    //While progress is safely cleared on execution completion.
+    //Initial progress must be started here to avoid a race condition
+    node.progress = 0
+    animateIntervals[id] = setInterval(() => {
+        if (getNodeById(id)?.progress == undefined
+            || app.canvas.graph.rootGraph != node.graph.rootGraph) {
+            clearTimeout(animateIntervals[id])
+            delete animateIntervals[id]
+            return
+        }
+        if (!previewImages[displayIndex]) {
+            return
+        }
+        getLatentPreviewCtx(id, previewImages[displayIndex].width,
+            previewImages[displayIndex].height)?.drawImage?.(previewImages[displayIndex],0,0)
+        displayIndex = (displayIndex + 1) % previewImages.length
+    }, 1000/rate);
+
+}
+let previewImagesDict = {}
+api.addEventListener('VHS_latentpreview', ({ detail }) => {
+    if (detail.id == null) {
+        return
+    }
+    let previewImages = previewImagesDict[detail.id] = []
+    previewImages.length = detail.length
+
+    let idParts = detail.id.split(':')
+    for (let i=1; i <= idParts.length; i++) {
+        let id = idParts.slice(0,i).join(':')
+        beginLatentPreview(id, previewImages, detail.rate)
+    }
+});
+let td = new TextDecoder()
+api.addEventListener('b_preview', async (e) => {
+    if (Object.keys(animateIntervals).length == 0) {
+        return
+    }
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    e.stopPropagation()
+    const dv = new DataView(await e.detail.slice(0,24).arrayBuffer())
+    const index = dv.getUint32(4)
+    const idlen = dv.getUint8(8)
+    const id = td.decode(dv.buffer.slice(9,9+idlen))
+    previewImagesDict[id][index] = await window.createImageBitmap(e.detail.slice(24))
+    return false
+}, true);

@@ -160,5 +160,3 @@ cython_debug/
 #.idea/
 # VIM swap files
 *.swp
-
-.DS_Store
