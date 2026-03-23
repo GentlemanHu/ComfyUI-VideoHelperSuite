@@ -2058,6 +2058,52 @@ app.registerExtension({
             addPreviewOptions(nodeType);
             addFormatWidgets(nodeType, nodeData);
             addVAEInputToggle(nodeType, nodeData)
+        } else if (nodeData?.name == "VHS_DepthFlow_Generator") {
+            // Add video preview for DepthFlow Generator
+            chainCallback(nodeType.prototype, "onExecuted", function(message) {
+                if (message?.video && message.video.length > 0) {
+                    const videoInfo = message.video[0];
+                    let format = "video/mp4";
+                    if (videoInfo.filename) {
+                        const ext = videoInfo.filename.split('.').pop().toLowerCase();
+                        if (ext === 'mkv') format = "video/x-matroska";
+                        else if (ext === 'webm') format = "video/webm";
+                        else if (ext === 'avi') format = "video/avi";
+                        else if (ext === 'gif') format = "image/gif";
+                    }
+                    this.updateParameters({
+                        filename: videoInfo.filename,
+                        subfolder: videoInfo.subfolder,
+                        type: videoInfo.type,
+                        format: format
+                    }, true);
+                }
+            });
+            addVideoPreview(nodeType, false);
+            addPreviewOptions(nodeType);
+        } else if (nodeData?.name == "VHS_VideoPreview") {
+            // Add video preview for Video Preview node
+            chainCallback(nodeType.prototype, "onExecuted", function(message) {
+                if (message?.video && message.video.length > 0) {
+                    const videoInfo = message.video[0];
+                    let format = "video/mp4";
+                    if (videoInfo.filename) {
+                        const ext = videoInfo.filename.split('.').pop().toLowerCase();
+                        if (ext === 'mkv') format = "video/x-matroska";
+                        else if (ext === 'webm') format = "video/webm";
+                        else if (ext === 'avi') format = "video/avi";
+                        else if (ext === 'gif') format = "image/gif";
+                    }
+                    this.updateParameters({
+                        filename: videoInfo.filename,
+                        subfolder: videoInfo.subfolder,
+                        type: videoInfo.type,
+                        format: format
+                    }, true);
+                }
+            });
+            addVideoPreview(nodeType, false);
+            addPreviewOptions(nodeType);
         } else if (nodeData?.name == "VHS_SaveImageSequence") {
             //Disabled for safety as VHS_SaveImageSequence is not currently merged
             //addDateFormating(nodeType, "directory_name", timestamp_widget=true);
@@ -2220,10 +2266,10 @@ app.registerExtension({
                             v = Math.round((v + Number.EPSILON) /
                                 this.options.round) * this.options.round
                         }
-                        if (this.options.max && v > this.options.max) {
+                        if (this.options.max != null && v > this.options.max) {
                             v = this.options.max
                         }
-                        if (this.options.min && v < this.options.max) {
+                        if (this.options.min != null && v < this.options.min) {
                             v = this.options.min
                         }
                         this.value = v
@@ -2251,16 +2297,13 @@ app.registerExtension({
                         return [width, 20]
                     },
                     callback(v) {
-                        if (this.options.max && v > this.options.max) {
+                        if (this.options.max != null && v > this.options.max) {
                             v = this.options.max
                         }
-                        if (this.options.min && v < this.options.min) {
+                        if (this.options.min != null && v < this.options.min) {
                             v = this.options.min
                         }
-                        if (v == 0) {
-                            return
-                        }
-                        const s = this.options.step
+                        const s = this.options.step ?? 1
                         let sh = this.options.mod ?? 0
                         this.value = Math.round((v - sh) / s) * s + sh
                     },

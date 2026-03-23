@@ -1,4 +1,8 @@
-from notifier.notify import notifyAll
+try:
+    from notifier.notify import notifyAll
+except Exception:
+    def notifyAll(*args, **kwargs):
+        return None
 import os
 import sys
 import json
@@ -27,21 +31,59 @@ from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_wor
         ContainsAll
 from comfy.utils import ProgressBar
 
-# Import custom additions
+# Import custom additions (按能力分组，避免单点导入失败导致全部不可用)
+HAS_VIDEO_OPS = False
+HAS_DEPTH_FEATURES = False
+HAS_GENTLE_CAPTION = False
+HAS_SHORTGPT = False
+
 try:
-    from .video_ops import *
+    from .video_ops import (
+        CompositeMedia,
+        CompositeMultiVideo,
+        MovisTimelinePro,
+        MovisCreateTimeline,
+        MovisAddVideoTrack,
+        MovisAddImageTrack,
+        MovisMergeTimeline,
+        MovisAddImageSequenceTrack,
+        MovisAddImageMotionTrack,
+        MovisAddVideoMotionTrack,
+        MovisAddAudioTrack,
+        MovisSetBGM,
+        MovisAddTextOverlay,
+        MovisRenderTimeline,
+        MovisAssemble,
+        MovisUniversalStudio,
+        MovisSmartMerge,
+    )
+    HAS_VIDEO_OPS = True
+except ImportError:
+    print("video_ops not available")
+
+try:
     from .depth_generator import *
-    from .caption import GentleCaption
+    HAS_DEPTH_FEATURES = True
+except ImportError:
+    print("depth_generator not available")
+
+try:
+    from .caption import GentleCaption, resolve_media_path
+    HAS_GENTLE_CAPTION = True
+except ImportError:
+    print("caption module not available")
+
+try:
     from shortGPT.audio import audio_utils
     from shortGPT.audio.audio_duration import get_asset_duration
-    from shortGPT.config.asset_db import AssetDatabase
     from shortGPT.config.languages import Language
     from shortGPT.editing_framework.editing_engine import EditingEngine, EditingStep
     from shortGPT.editing_utils import captions
-    HAS_CUSTOM_FEATURES = True
+    HAS_SHORTGPT = True
 except ImportError:
-    HAS_CUSTOM_FEATURES = False
-    print("Custom features (captions, video_ops, depth_generator) not available")
+    print("shortGPT not available")
+
+HAS_CUSTOM_FEATURES = HAS_VIDEO_OPS or HAS_DEPTH_FEATURES or HAS_GENTLE_CAPTION or HAS_SHORTGPT
 
 if 'VHS_video_formats' not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["VHS_video_formats"] = ((),{".json"})
@@ -381,7 +423,7 @@ class VideoCombine:
             extra_options = extra_pnginfo.get('workflow', {}).get('extra', {})
         else:
             extra_options = {}
-        metadata.add_text("CreationTime", datetime.datetime.now().isoformat(" ")[:19])
+        # metadata.add_text("CreationTime", datetime.datetime.now().isoformat(" ")[:19])
 
         if meta_batch is not None and unique_id in meta_batch.outputs:
             (counter, output_process) = meta_batch.outputs[unique_id]
@@ -1075,7 +1117,7 @@ if HAS_CUSTOM_FEATURES:
         Returns:
             The duration of the audio file in seconds.
         """
-        ffmpeg_cmd = ['ffmpeg', '-i', audio_file]
+        ffmpeg_cmd = [ffmpeg_path or 'ffmpeg', '-i', audio_file]
         output = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         duration_regex = re.compile(r"Duration: (?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+\.\d+)")
         match = duration_regex.search(output.stdout.decode('utf-8'))
@@ -1112,7 +1154,7 @@ if HAS_CUSTOM_FEATURES:
             output_file_abs = os.path.join(folder_paths.get_output_directory(), f"audio_{_datetime}.mp3")
 
             # Construct FFmpeg command
-            ffmpeg_cmd = ['ffmpeg', '-i', audio_file_1, '-i', audio_file_2, '-filter_complex',
+            ffmpeg_cmd = [ffmpeg_path or 'ffmpeg', '-i', audio_file_1, '-i', audio_file_2, '-filter_complex',
                           '[0:a][1:a]concat=n=2:v=0:a=1[a]', '-map', '[a]', output_file_abs]
 
             # Execute FFmpeg command
@@ -1153,114 +1195,64 @@ if HAS_CUSTOM_FEATURES:
 
             return {
                 "required": {
-                    "video_path": ("STRING",{"default": ""}),
-                    "output_filename": ("STRING",{"default": "_captioned"}),
-                    "is_vertical": ("BOOLEAN",{"default": True}),
-                    "add_subscription_anim": ("BOOLEAN",{"default": False}),
-                    "notify_all": ("BOOLEAN",{"default":True})
+                    "video_path": ("STRING",{"default": "", "tooltip": "输入视频路径（支持相对/绝对路径）"}),
+                    "output_filename": ("STRING",{"default": "_captioned", "tooltip": "输出文件名前缀"}),
+                    "is_vertical": ("BOOLEAN",{"default": True, "tooltip": "是否按竖屏流程处理（裁剪/缩放策略）"}),
+                    "add_subscription_anim": ("BOOLEAN",{"default": False, "tooltip": "预留参数，当前版本未启用"}),
+                    "notify_all": ("BOOLEAN",{"default":True, "tooltip": "完成后发送通知"})
                 },
                 "optional": {
-                    "audio_path": ("STRING",{"default":""}),
-                    "water_mark": ("STRING",{"default":"OnePieOne"}),
-                    "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True}),
-                    "notify_message": ("STRING",{"default":"====Caption===="})       
+                    "audio_path": ("STRING",{"default":"", "tooltip": "可选音频路径；为空时使用视频原音轨"}),
+                    "water_mark": ("STRING",{"default":"OnePieOne", "tooltip": "预留参数，当前版本未启用"}),
+                    "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True, "tooltip": "字幕样式参数（JSON/Python字典）"}),
+                    "notify_message": ("STRING",{"default":"====Caption====", "tooltip": "通知消息内容"})       
                 },
                 "hidden": {},
             }
 
-        RETURN_TYPES = ("STRING",)
-        RETURN_NAMES = ("Video Path",)
+        RETURN_TYPES = ("STRING", "INT")
+        RETURN_NAMES = ("Video Path", "frames")
         OUTPUT_NODE = True
         CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
         FUNCTION = "add_captions"
 
         def add_captions(self, video_path, output_filename, audio_path,is_vertical,add_subscription_anim,water_mark,notify_all,caption_json_param,notify_message):
-            m_is_vertical = is_vertical
-            language = Language.ENGLISH
+            if not HAS_GENTLE_CAPTION:
+                raise RuntimeError("VideoCaptions 需要 caption 模块依赖")
 
-            if audio_path is None or audio_path == "" :
-                m_audio_path = video_path
-            else:
-                m_audio_path = audio_path
+            video_path = resolve_media_path(video_path, must_exist=True)
+            audio_path = resolve_media_path(audio_path, must_exist=True) if str(audio_path or "").strip() else ""
+            output_filename = str(output_filename or "_captioned").strip() or "_captioned"
 
-            _datetime = datetime.datetime.now().strftime("%Y%m%d")
-            _datetime = _datetime + datetime.datetime.now().strftime("%H%M%S%f")
-
-            output_path = os.path.join(folder_paths.get_output_directory(), output_filename+f"_{_datetime}.mp4")
-
-            if not os.path.exists(output_path):
-                print("Rendering short: Starting automated editing...")
-
-                print(f"Caption Param --- {caption_json_param}")
-
-                timed_captions = self._time_captions(m_audio_path, m_is_vertical)
-
-                video_editor = EditingEngine()
-                video_editor.addEditingStep(EditingStep.ADD_VOICEOVER_AUDIO, {"url": m_audio_path})
-
-                if add_subscription_anim:
-                    video_editor.addEditingStep(
-                        EditingStep.ADD_SUBSCRIBE_ANIMATION, {"url": "public/subscribe-animation.mp4"}
-                    )
-
-                _, vid_length = get_asset_duration(video_path)
-                video_editor.addEditingStep(
-                    EditingStep.ADD_BACKGROUND_VIDEO,
-                    {"url": video_path, "set_time_start": 0, "set_time_end": vid_length},
-                )
-
-                video_editor.addEditingStep(EditingStep.CROP_1920x1080, {"url": video_path})
-
-                video_editor.addEditingStep(EditingStep.ADD_WATERMARK,{"text":water_mark})
-
-                if m_is_vertical:
-                    caption_type = (
-                        EditingStep.ADD_CAPTION_SHORT_ARABIC
-                        if language == Language.ARABIC
-                        else EditingStep.ADD_CAPTION_SHORT
-                    )
-                else:
-                    caption_type = (
-                        EditingStep.ADD_CAPTION_LANDSCAPE_ARABIC
-                        if language == Language.ARABIC
-                        else EditingStep.ADD_CAPTION_LANDSCAPE
-                    )
-
-                for (t1, t2), text in timed_captions:
-                    formated = '{' + caption_json_param.strip() + '}'
-                    
-                    template_dict = json.loads(formated,strict=False)
-
-                    template_dict["text"] = text.upper()
-                    template_dict["set_time_start"] = t1
-                    template_dict["set_time_end"] = t2
-                    video_editor.addEditingStep(
-                        caption_type,
-                        template_dict,
-                    )
-
-                video_editor.renderVideo(output_path, None)
-
+            cp = GentleCaption()
+            params = cp.parse_caption_params(caption_json_param)
+            _real_filename, output_path, frames = cp.make_video(
+                bg_video_path=video_path,
+                bg_audio_path=audio_path,
+                output_filename=output_filename,
+                extra_para=params,
+                is_vertical=is_vertical,
+            )
             if notify_all:
                 notifyAll(output_path, f"{notify_message}")
-            return {"ui": {"video": [{"filename": output_filename, "subfolder": "", "type": "output"}]}, "result": (output_path,)}
+            return {
+                "ui": {
+                    "video": [{"filename": os.path.basename(output_path), "subfolder": "", "type": "output"}],
+                    "frames": [frames],
+                },
+                "result": (output_path, frames),
+            }
 
         def _time_captions(self, audio_path, is_vertical=True):
+            if not HAS_SHORTGPT:
+                return []
             whisper_analysis = audio_utils.audioToText(audio_path)
-            max_len = 15
-
-            if is_vertical:
-                max_len = 30
-
-            result = captions.getCaptionsWithTime(whisper_analysis, maxCaptionSize=max_len)
-
-            print(result)
-            return result
+            max_len = 30 if is_vertical else 15
+            return captions.getCaptionsWithTime(whisper_analysis, maxCaptionSize=max_len)
 
     class VideoGentleCaptions:
         def __init__(self) -> None:
-            self.cp = GentleCaption()
-            pass
+            self.cp = None
         
         @classmethod
         def INPUT_TYPES(cls):
@@ -1284,32 +1276,44 @@ if HAS_CUSTOM_FEATURES:
 
             return {
                 "required": {
-                    "video_path": ("STRING",{"default": ""}),
-                    "output_filename": ("STRING",{"default": "_captioned"}),
-                    "is_vertical": ("BOOLEAN",{"default": True}),
-                    "notify_all": ("BOOLEAN",{"default":True})
+                    "video_path": ("STRING",{"default": "", "tooltip": "输入视频路径（支持相对/绝对路径）"}),
+                    "output_filename": ("STRING",{"default": "_captioned", "tooltip": "输出文件名前缀"}),
+                    "is_vertical": ("BOOLEAN",{"default": True, "tooltip": "是否按竖屏流程处理（裁剪/缩放策略）"}),
+                    "notify_all": ("BOOLEAN",{"default":True, "tooltip": "完成后发送通知"})
                 },
                 "optional": {
-                    "audio_path": ("STRING",{"default":""}),
-                    "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True}),
-                    "notify_message": ("STRING",{"default":"====Caption===="})   
+                    "audio_path": ("STRING",{"default":"", "tooltip": "可选音频路径；为空时使用视频原音轨"}),
+                    "caption_json_param": ("STRING",{"default":f"{default_template_para}","multiline":True, "tooltip": "字幕样式参数（JSON/Python字典）"}),
+                    "notify_message": ("STRING",{"default":"====Caption====", "tooltip": "通知消息内容"})   
                 },
                 "hidden": {},
             }
 
-        RETURN_TYPES = ("STRING",)
-        RETURN_NAMES = ("Video Path",)
+        RETURN_TYPES = ("STRING", "INT")
+        RETURN_NAMES = ("Video Path", "frames")
         OUTPUT_NODE = True
         CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
         FUNCTION = "add_gentle_captions"
 
         def add_gentle_captions(self, video_path, output_filename, audio_path,is_vertical,notify_all,caption_json_param,notify_message):
-            
-            # 删除换行符和缩进
-            para = caption_json_param.replace('\n', '')
-            para = para.replace(' ', '')
-            para = "{"+para+"}"
-            real_filename, video_result =  self.cp.makeVideo(bg_video_path=video_path,bg_audio_path=audio_path,output_filename=output_filename,extra_para=dict(eval(para)))
+            if not HAS_GENTLE_CAPTION:
+                raise RuntimeError("VideoGentleCaptions 需要 caption 模块依赖")
+
+            video_path = resolve_media_path(video_path, must_exist=True)
+            audio_path = resolve_media_path(audio_path, must_exist=True) if str(audio_path or "").strip() else ""
+            output_filename = str(output_filename or "_captioned").strip() or "_captioned"
+
+            if self.cp is None:
+                self.cp = GentleCaption()
+
+            params = self.cp.parse_caption_params(caption_json_param)
+            real_filename, video_result, frames = self.cp.make_video(
+                bg_video_path=video_path,
+                bg_audio_path=audio_path,
+                output_filename=output_filename,
+                extra_para=params,
+                is_vertical=is_vertical,
+            )
 
             if notify_all:
                 notifyAll(video_result, f"{notify_message}")
@@ -1322,7 +1326,14 @@ if HAS_CUSTOM_FEATURES:
                     "format": "video/h264-mp4",
                 }
             ]
-            return {"ui": {"gifs": previews, "video": [{"filename": real_filename, "subfolder": "", "type": "output"}]}, "result": (video_result,os.path.join(folder_paths.get_output_directory(), real_filename))}
+            return {
+                "ui": {
+                    "gifs": previews,
+                    "video": [{"filename": real_filename, "subfolder": "", "type": "output"}],
+                    "frames": [frames],
+                },
+                "result": (video_result, frames),
+            }
 
 # Node mappings
 NODE_CLASS_MAPPINGS = {
@@ -1419,34 +1430,72 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 # Add custom nodes only if dependencies are available
 if HAS_CUSTOM_FEATURES:
-    NODE_CLASS_MAPPINGS.update({
-        "VHS_MergeAudio": MergeAudio,
-        "VHS_VideoCaptions": VideoCaptions,
-        "VHS_VideoGentleCaptions": VideoGentleCaptions,
-    })
-    
-    NODE_DISPLAY_NAME_MAPPINGS.update({
-        "VHS_MergeAudio": "Merge Audio 🎥🅥🅗🅢",
-        "VHS_VideoCaptions": "Video Captions 🎥🅥🅗🅢",
-        "VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢",
-    })
+    if 'MergeAudio' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_MergeAudio": MergeAudio})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_MergeAudio": "Merge Audio 🎥🅥🅗🅢"})
+    if 'VideoCaptions' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_VideoCaptions": VideoCaptions})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_VideoCaptions": "Video Captions 🎥🅥🅗🅢"})
+    if 'VideoGentleCaptions' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_VideoGentleCaptions": VideoGentleCaptions})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢"})
     
     # Try to add video_ops nodes if available
     try:
         NODE_CLASS_MAPPINGS.update({
+            "VHS_MOVIS_CreateTimeline": MovisCreateTimeline,
+            "VHS_MOVIS_AddVideoTrack": MovisAddVideoTrack,
+            "VHS_MOVIS_AddImageTrack": MovisAddImageTrack,
+            "VHS_MOVIS_MergeTimeline": MovisMergeTimeline,
+            "VHS_MOVIS_AddImageTrackSequence": MovisAddImageSequenceTrack,
+            "VHS_MOVIS_AddImageMotionTrack": MovisAddImageMotionTrack,
+            "VHS_MOVIS_AddVideoMotionTrack": MovisAddVideoMotionTrack,
+            "VHS_MOVIS_AddAudioTrack": MovisAddAudioTrack,
+            "VHS_MOVIS_SetBGM": MovisSetBGM,
+            "VHS_MOVIS_AddTextOverlay": MovisAddTextOverlay,
+            "VHS_MOVIS_RenderTimeline": MovisRenderTimeline,
+            "VHS_MOVIS_Assemble": MovisAssemble,
+            "VHS_MOVIS_UniversalStudio": MovisUniversalStudio,
+            "VHS_MOVIS_SmartMerge": MovisSmartMerge,
+            "VHS_MOVIS_TimelinePro": MovisTimelinePro,
             "VHS_MOVIS_COMPOSITE": CompositeMedia,
             "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
         })
         NODE_DISPLAY_NAME_MAPPINGS.update({
-            "VHS_MOVIS_COMPOSITE": "Movis Composite 🎥🅥🅗🅢",
-            "VHS_MOVIS_MultiVideo": "Movis Multi-Video 🎥🅥🅗🅢",
+            "VHS_MOVIS_CreateTimeline": "Movis Create Timeline 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddVideoTrack": "Movis Add Video Track 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddImageTrack": "Movis Add Image (Path) 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_MergeTimeline": "Movis Merge Timeline 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddImageTrackSequence": "Movis Add Image Sequence (Tensor) 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddImageMotionTrack": "Movis Add Image Motion 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddVideoMotionTrack": "Movis Add Video Motion 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddAudioTrack": "Movis Add Audio Track 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_SetBGM": "Movis Set BGM 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_AddTextOverlay": "Movis Add Text Overlay 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_RenderTimeline": "Movis Render Timeline 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_Assemble": "Movis Assemble (All-in-One) 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_UniversalStudio": "Movis Universal Studio (Pro) 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_SmartMerge": "Movis Smart Merge 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_TimelinePro": "Movis Timeline Pro 🎬🎥🅥🅗🅢",
+            "VHS_MOVIS_COMPOSITE": "Movis Composite (Deprecated) 🎥🅥🅗🅢",
+            "VHS_MOVIS_MultiVideo": "Movis Multi-Video (Deprecated) 🎥🅥🅗🅢",
         })
     except NameError:
         print("Movis nodes not available")
     
-    # Try to add depth generator if available
+    # Try to add depth generator and video preview nodes if available
     try:
-        NODE_CLASS_MAPPINGS["VHS_DepthFlow_Generator"] = DepthFlowGenerator
-        NODE_DISPLAY_NAME_MAPPINGS["VHS_DepthFlow_Generator"] = "DepthFlow Generator 🎥🅥🅗🅢"
-    except NameError:
-        print("DepthFlow Generator not available")
+        NODE_CLASS_MAPPINGS.update({
+            "VHS_DepthFlow_Generator": DepthFlowGenerator,
+            "VHS_VideoPreview": VideoPreview,
+            "VHS_VideoPathInput": VideoPathInput,
+            "VHS_VideoCacheManager": VideoCacheManager,
+        })
+        NODE_DISPLAY_NAME_MAPPINGS.update({
+            "VHS_DepthFlow_Generator": "DepthFlow Generator 🌊🎥🅥🅗🅢",
+            "VHS_VideoPreview": "Video Preview 🎬🎥🅥🅗🅢",
+            "VHS_VideoPathInput": "Video Path Input 📁🎥🅥🅗🅢",
+            "VHS_VideoCacheManager": "Video Cache Manager 🗑️🎥🅥🅗🅢",
+        })
+    except NameError as e:
+        print(f"DepthFlow/Video nodes not available: {e}")
