@@ -1,5 +1,6 @@
 import copy
 import datetime
+import subprocess
 import wave
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from tqdm import tqdm
 import folder_paths
 
 from .caption import resolve_media_path
-from .utils import get_audio
+from .utils import ffmpeg_path, get_audio
 
 try:
     from notifier.notify import notifyAll
@@ -355,6 +356,501 @@ def _timeline_content_duration(timeline: dict[str, Any]) -> float:
     return max(end_points)
 
 
+def _resolve_video_clip_index(clips: list[dict[str, Any]], clip_index: int) -> int | None:
+    if len(clips) == 0:
+        return None
+    idx = int(clip_index)
+    if idx < 0:
+        idx = len(clips) + idx
+    idx = max(0, min(len(clips) - 1, idx))
+    return idx
+
+
+def _resolve_clip_transition(timeline: dict[str, Any], clip: dict[str, Any], index: int, total: int, entering: bool) -> dict[str, Any] | None:
+    key = "transition_in" if entering else "transition_out"
+    direct = clip.get(key)
+    if isinstance(direct, dict):
+        return direct
+    global_t = timeline.get("global_transition")
+    if not isinstance(global_t, dict):
+        return None
+    if entering and index == 0 and not bool(global_t.get("apply_to_first", False)):
+        return None
+    if (not entering) and index == total - 1 and not bool(global_t.get("apply_to_last", False)):
+        return None
+    return {
+        "type": str(global_t.get("type", "crossfade")),
+        "duration": _safe_float(global_t.get("duration", 0.35), 0.35, min_value=0.0),
+        "easing": str(global_t.get("easing", "ease_in_out")),
+        "softness": _safe_float(global_t.get("softness", 0.5), 0.5, min_value=0.0, max_value=1.0),
+        "custom_curve": str(global_t.get("custom_curve", "")),
+    }
+
+
+TRANSITION_TYPES = [
+    "none",
+    "crossfade",
+    "fade_black",
+    "slide_left",
+    "slide_right",
+    "slide_up",
+    "slide_down",
+    "zoom_in",
+    "zoom_out",
+    "wipe_left",
+    "wipe_right",
+    "push_left",
+    "push_right",
+    "custom",
+]
+
+TRANSITION_EASINGS = ["linear", "ease_in", "ease_out", "ease_in_out"]
+
+FX_TYPES = [
+    "none",
+    "shake",
+    "zoom_pulse",
+    "glitch",
+    "strobe",
+    "drift",
+    "spin_wiggle",
+    "custom",
+]
+
+FX_PRESETS = [
+    "cyber_glitch",
+    "impact_shake",
+    "dream_pulse",
+    "energy_spin",
+]
+
+GPU_SHADER_CODECS = ["libx264", "h264_nvenc", "hevc_nvenc"]
+GPU_SHADER_BACKENDS = ["libplacebo_vulkan"]
+
+
+def _escape_ffmpeg_filter_path(path: str) -> str:
+    p = str(Path(path).resolve()).replace("\\", "/")
+    p = p.replace(":", "\\:").replace("'", "\\'")
+    return p
+
+
+def _resolve_shader_file(shader_path: str, shader_code: str, prefix: str = "movis_shader") -> str:
+    code = str(shader_code or "").strip()
+    if code:
+        temp_dir = Path(folder_paths.get_temp_directory()) / "vhs_movis_shaders"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        out = temp_dir / f"{prefix}_{_now_stamp()}.glsl"
+        out.write_text(code, encoding="utf-8")
+        return str(out.resolve())
+    path = str(shader_path or "").strip()
+    if not path:
+        raise ValueError("未提供 shader：请设置 shader_path 或 shader_code")
+    return resolve_media_path(path, must_exist=True)
+
+
+def _apply_gpu_shader_ffmpeg(input_video_path: str, shader_file_path: str, output_file_prefix: str, backend: str, codec: str, keep_audio: bool) -> str:
+    ffmpeg_bin = ffmpeg_path or "ffmpeg"
+    out_name = f"{output_file_prefix}{_now_stamp()}.mp4"
+    out_path = str((Path(folder_paths.get_output_directory()) / out_name).resolve())
+
+    be = str(backend or "libplacebo_vulkan").strip().lower()
+    if be not in GPU_SHADER_BACKENDS:
+        be = "libplacebo_vulkan"
+
+    c = str(codec or "libx264").strip().lower()
+    if c not in GPU_SHADER_CODECS:
+        c = "libx264"
+
+    shader_escaped = _escape_ffmpeg_filter_path(shader_file_path)
+    if be == "libplacebo_vulkan":
+        vf = f"libplacebo=custom_shader_path='{shader_escaped}'"
+    else:
+        vf = f"libplacebo=custom_shader_path='{shader_escaped}'"
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        input_video_path,
+        "-vf",
+        vf,
+        "-c:v",
+        c,
+        "-pix_fmt",
+        "yuv420p",
+    ]
+    if keep_audio:
+        cmd += ["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"]
+    else:
+        cmd += ["-an"]
+    cmd += [out_path]
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(
+            "GPU Shader 渲染失败（ffmpeg/libplacebo）。\n"
+            "请确认你的 ffmpeg 构建包含 libplacebo/vulkan。\n"
+            f"stderr:\n{res.stderr.strip()}"
+        )
+    return out_path
+
+
+
+
+def _normalize_clip_shader_entry(shader: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(shader, dict):
+        return None
+    shader_code = str(shader.get("shader_code", "") or "")
+    shader_path = str(shader.get("shader_path", "") or "")
+    if not shader_code.strip() and not shader_path.strip():
+        return None
+    backend = str(shader.get("backend", "libplacebo_vulkan") or "libplacebo_vulkan").strip().lower()
+    if backend not in GPU_SHADER_BACKENDS:
+        backend = "libplacebo_vulkan"
+    codec = str(shader.get("codec", "libx264") or "libx264").strip().lower()
+    if codec not in GPU_SHADER_CODECS:
+        codec = "libx264"
+    return {
+        "shader_path": shader_path,
+        "shader_code": shader_code,
+        "backend": backend,
+        "codec": codec,
+        "keep_audio": bool(shader.get("keep_audio", True)),
+        "output_file_prefix": str(shader.get("output_file_prefix", "movis_clip_shader_") or "movis_clip_shader_"),
+        "enabled": bool(shader.get("enabled", True)),
+    }
+
+
+def _iter_clip_shaders(clip: dict[str, Any]) -> list[dict[str, Any]]:
+    shaders = clip.get("clip_shaders")
+    if not isinstance(shaders, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for shader in shaders:
+        normalized = _normalize_clip_shader_entry(shader)
+        if normalized is not None and bool(normalized.get("enabled", True)):
+            out.append(normalized)
+    return out
+
+
+def _apply_clip_shaders_to_path(clip: dict[str, Any]) -> str:
+    current_path = str(clip.get("path", "") or "")
+    if not current_path:
+        raise ValueError("clip 缺少 path，无法应用 clip shader")
+    for shader in _iter_clip_shaders(clip):
+        shader_file = _resolve_shader_file(
+            shader.get("shader_path", ""),
+            shader.get("shader_code", ""),
+            prefix="movis_clip_shader",
+        )
+        current_path = _apply_gpu_shader_ffmpeg(
+            input_video_path=current_path,
+            shader_file_path=shader_file,
+            output_file_prefix=str(shader.get("output_file_prefix", "movis_clip_shader_") or "movis_clip_shader_"),
+            backend=str(shader.get("backend", "libplacebo_vulkan") or "libplacebo_vulkan"),
+            codec=str(shader.get("codec", "libx264") or "libx264"),
+            keep_audio=bool(shader.get("keep_audio", True)),
+        )
+    return current_path
+
+
+def _make_transition(kind: str, duration: float, easing: str = "ease_in_out", softness: float = 0.5, custom_curve: str = "") -> dict[str, Any] | None:
+    k = str(kind or "none").strip().lower()
+    d = _safe_float(duration, 0.0, min_value=0.0)
+    if k == "none" or d <= 0:
+        return None
+    if k not in TRANSITION_TYPES:
+        k = "crossfade"
+    e = str(easing or "ease_in_out").strip().lower()
+    if e not in TRANSITION_EASINGS:
+        e = "ease_in_out"
+    return {
+        "type": k,
+        "duration": d,
+        "easing": e,
+        "softness": _safe_float(softness, 0.5, min_value=0.0, max_value=1.0),
+        "custom_curve": str(custom_curve or "").strip(),
+    }
+
+
+def _parse_custom_curve(curve: str) -> tuple[list[float], list[float]] | None:
+    # format: "0:0,0.4:0.2,1:1"
+    if not curve:
+        return None
+    pairs: list[tuple[float, float]] = []
+    for seg in str(curve).replace(";", ",").split(","):
+        seg = seg.strip()
+        if not seg or ":" not in seg:
+            continue
+        a, b = seg.split(":", 1)
+        try:
+            t = max(0.0, min(1.0, float(a.strip())))
+            v = max(0.0, min(1.0, float(b.strip())))
+        except Exception:
+            continue
+        pairs.append((t, v))
+    if len(pairs) < 2:
+        return None
+    pairs.sort(key=lambda x: x[0])
+    return [x[0] for x in pairs], [x[1] for x in pairs]
+
+
+def _make_fx(kind: str, start_norm: float, end_norm: float, intensity: float, speed: float, seed: int = 0, custom_curve: str = "") -> dict[str, Any] | None:
+    k = str(kind or "none").strip().lower()
+    if k == "none":
+        return None
+    if k not in FX_TYPES:
+        k = "glitch"
+    s = _safe_float(start_norm, 0.0, min_value=0.0, max_value=1.0)
+    e = _safe_float(end_norm, 1.0, min_value=0.0, max_value=1.0)
+    if e <= s:
+        e = min(1.0, s + 0.01)
+    return {
+        "type": k,
+        "start_norm": s,
+        "end_norm": e,
+        "intensity": _safe_float(intensity, 0.5, min_value=0.0, max_value=2.0),
+        "speed": _safe_float(speed, 1.0, min_value=0.05, max_value=20.0),
+        "seed": int(seed),
+        "custom_curve": str(custom_curve or "").strip(),
+    }
+
+
+def _iter_clip_effects(clip: dict[str, Any]) -> list[dict[str, Any]]:
+    effects = clip.get("effects")
+    if not isinstance(effects, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for fx in effects:
+        if isinstance(fx, dict) and fx.get("type"):
+            out.append(fx)
+    return out
+
+
+def _apply_clip_fx(item, effect: dict[str, Any], clip_duration: float, base_position: tuple[float, float], base_scale: tuple[float, float], base_rotation: float, base_opacity: float, width: int, height: int, clip_index: int):
+    kind = str(effect.get("type", "none")).strip().lower()
+    if kind == "none":
+        return
+    start_norm = _safe_float(effect.get("start_norm", 0.0), 0.0, min_value=0.0, max_value=1.0)
+    end_norm = _safe_float(effect.get("end_norm", 1.0), 1.0, min_value=0.0, max_value=1.0)
+    t0 = float(clip_duration) * start_norm
+    t1 = float(clip_duration) * max(start_norm + 1e-4, end_norm)
+    if t1 - t0 < 1e-4:
+        return
+
+    intensity = _safe_float(effect.get("intensity", 0.5), 0.5, min_value=0.0, max_value=2.0)
+    speed = _safe_float(effect.get("speed", 1.0), 1.0, min_value=0.05, max_value=20.0)
+    seed = int(effect.get("seed", 0)) + int(clip_index)
+    rng = np.random.default_rng(seed)
+
+    x0, y0 = base_position
+    sx0, sy0 = base_scale
+    fx_dur = max(1e-3, t1 - t0)
+
+    if kind == "shake":
+        amp = min(width, height) * 0.006 * intensity
+        steps = max(6, int(fx_dur * 18.0 * speed))
+        times = np.linspace(t0, t1, steps)
+        vals = [(float(x0 + rng.uniform(-amp, amp)), float(y0 + rng.uniform(-amp, amp))) for _ in range(steps - 1)] + [base_position]
+        item.position.enable_motion().extend(keyframes=[float(t) for t in times], values=vals)
+        return
+
+    if kind == "zoom_pulse":
+        cycles = max(1, int(round(fx_dur * speed * 2.0)))
+        times = np.linspace(t0, t1, cycles * 2 + 1)
+        amp = 0.03 * intensity
+        vals = []
+        for i in range(len(times)):
+            phase = np.sin((i / max(1, len(times) - 1)) * np.pi * cycles)
+            k = 1.0 + amp * float(phase)
+            vals.append((float(sx0 * k), float(sy0 * k)))
+        vals[-1] = base_scale
+        item.scale.enable_motion().extend(keyframes=[float(t) for t in times], values=vals)
+        return
+
+    if kind == "strobe":
+        hz = max(2.0, speed * 8.0)
+        steps = max(6, int(fx_dur * hz))
+        times = np.linspace(t0, t1, steps)
+        low = max(0.0, base_opacity * (1.0 - 0.75 * intensity))
+        vals = [float(base_opacity if i % 2 == 0 else low) for i in range(steps)]
+        vals[-1] = float(base_opacity)
+        item.opacity.enable_motion().extend(keyframes=[float(t) for t in times], values=vals)
+        return
+
+    if kind == "drift":
+        dx = width * 0.04 * intensity
+        dy = height * 0.02 * intensity
+        item.position.enable_motion().extend(
+            keyframes=[t0, t0 + fx_dur * 0.5, t1],
+            values=[base_position, (x0 + dx, y0 - dy), base_position],
+            easings=["ease_out", "ease_in"],
+        )
+        return
+
+    if kind == "spin_wiggle":
+        deg = 8.0 * intensity
+        item.rotation.enable_motion().extend(
+            keyframes=[t0, t0 + fx_dur * 0.25, t0 + fx_dur * 0.5, t0 + fx_dur * 0.75, t1],
+            values=[base_rotation, base_rotation + deg, base_rotation - deg, base_rotation + deg * 0.4, base_rotation],
+            easings=["ease_out", "linear", "linear", "ease_in"],
+        )
+        return
+
+    if kind in {"glitch", "custom"}:
+        parsed = _parse_custom_curve(str(effect.get("custom_curve", "")))
+        if parsed:
+            ts, vs = parsed
+            times = [t0 + fx_dur * float(t) for t in ts]
+            max_amp = min(width, height) * 0.01 * intensity
+            pos_vals = [
+                (
+                    float(x0 + (float(v) - 0.5) * 2.0 * max_amp),
+                    float(y0 + (0.5 - float(v)) * 2.0 * max_amp),
+                )
+                for v in vs
+            ]
+            item.position.enable_motion().extend(keyframes=times, values=pos_vals)
+            return
+
+        steps = max(8, int(fx_dur * speed * 20.0))
+        times = np.linspace(t0, t1, steps)
+        pos_amp = min(width, height) * 0.008 * intensity
+        rot_amp = 3.5 * intensity
+        op_min = max(0.0, base_opacity * (1.0 - 0.45 * intensity))
+
+        pos_vals = []
+        rot_vals = []
+        op_vals = []
+        for _ in range(steps):
+            pos_vals.append((float(x0 + rng.uniform(-pos_amp, pos_amp)), float(y0 + rng.uniform(-pos_amp, pos_amp))))
+            rot_vals.append(float(base_rotation + rng.uniform(-rot_amp, rot_amp)))
+            op_vals.append(float(rng.uniform(op_min, base_opacity)))
+        pos_vals[-1] = base_position
+        rot_vals[-1] = base_rotation
+        op_vals[-1] = base_opacity
+
+        item.position.enable_motion().extend(keyframes=[float(t) for t in times], values=pos_vals)
+        item.rotation.enable_motion().extend(keyframes=[float(t) for t in times], values=rot_vals)
+        item.opacity.enable_motion().extend(keyframes=[float(t) for t in times], values=op_vals)
+        return
+
+
+def _build_fx_preset(preset: str, strength: float, seed: int) -> list[dict[str, Any]]:
+    p = str(preset or "cyber_glitch").strip().lower()
+    s = _safe_float(strength, 0.8, min_value=0.05, max_value=2.0)
+    if p == "impact_shake":
+        return [
+            _make_fx("shake", 0.0, 0.35, min(2.0, 1.3 * s), 1.5, seed),
+            _make_fx("zoom_pulse", 0.0, 0.35, 0.8 * s, 1.6, seed + 1),
+        ]
+    if p == "dream_pulse":
+        return [
+            _make_fx("drift", 0.0, 1.0, 0.7 * s, 0.8, seed),
+            _make_fx("zoom_pulse", 0.1, 0.95, 0.45 * s, 0.7, seed + 1),
+        ]
+    if p == "energy_spin":
+        return [
+            _make_fx("spin_wiggle", 0.0, 0.55, 1.0 * s, 1.2, seed),
+            _make_fx("glitch", 0.55, 1.0, 0.6 * s, 1.3, seed + 1),
+        ]
+    # cyber_glitch (default)
+    return [
+        _make_fx("glitch", 0.0, 0.28, 0.95 * s, 1.6, seed),
+        _make_fx("strobe", 0.28, 0.42, 0.55 * s, 1.1, seed + 1),
+        _make_fx("zoom_pulse", 0.42, 1.0, 0.6 * s, 0.9, seed + 2),
+    ]
+
+
+def _transition_motion_values(kind: str, entering: bool, position: tuple[float, float], scale: tuple[float, float], width: int, height: int) -> tuple[tuple[float, float], tuple[float, float]]:
+    x, y = position
+    sx, sy = scale
+    offx = width * 0.9
+    offy = height * 0.9
+
+    if kind in {"slide_left", "wipe_left", "push_left"}:
+        start_pos = (x + offx, y)
+        end_pos = (x, y)
+        return (start_pos, end_pos) if entering else (end_pos, (x - offx, y))
+    if kind in {"slide_right", "wipe_right", "push_right"}:
+        start_pos = (x - offx, y)
+        end_pos = (x, y)
+        return (start_pos, end_pos) if entering else (end_pos, (x + offx, y))
+    if kind == "slide_up":
+        start_pos = (x, y + offy)
+        end_pos = (x, y)
+        return (start_pos, end_pos) if entering else (end_pos, (x, y - offy))
+    if kind == "slide_down":
+        start_pos = (x, y - offy)
+        end_pos = (x, y)
+        return (start_pos, end_pos) if entering else (end_pos, (x, y + offy))
+    if kind == "zoom_in":
+        start_scale = (sx * 1.2, sy * 1.2)
+        end_scale = (sx, sy)
+        return (start_scale, end_scale) if entering else (end_scale, (sx * 0.9, sy * 0.9))
+    if kind == "zoom_out":
+        start_scale = (sx * 0.9, sy * 0.9)
+        end_scale = (sx, sy)
+        return (start_scale, end_scale) if entering else (end_scale, (sx * 1.2, sy * 1.2))
+    return (position, position) if kind not in {"zoom_in", "zoom_out"} else (scale, scale)
+
+
+def _apply_transition(item, transition: dict[str, Any] | None, clip_duration: float, base_position: tuple[float, float], base_scale: tuple[float, float], base_opacity: float, width: int, height: int, entering: bool, allow_spatial: bool):
+    if not transition:
+        return
+    kind = str(transition.get("type", "none"))
+    if kind == "none":
+        return
+    dur = _safe_float(transition.get("duration", 0.0), 0.0, min_value=0.0)
+    if dur <= 0:
+        return
+    d = min(float(clip_duration), dur)
+    easing = str(transition.get("easing", "ease_in_out"))
+    softness = _safe_float(transition.get("softness", 0.5), 0.5, min_value=0.0, max_value=1.0)
+    custom_curve = str(transition.get("custom_curve", ""))
+
+    if entering:
+        t0, t1 = 0.0, d
+        op_from, op_to = (0.0, base_opacity)
+    else:
+        t0, t1 = max(0.0, float(clip_duration) - d), float(clip_duration)
+        op_from, op_to = (base_opacity, 0.0)
+
+    if kind == "custom":
+        parsed = _parse_custom_curve(custom_curve)
+        if parsed:
+            ts, vs = parsed
+            kfs = [t0 + (t1 - t0) * t for t in ts]
+            vals = [float(base_opacity) * float(v) for v in vs]
+            item.opacity.enable_motion().extend(keyframes=kfs, values=vals)
+            return
+        kind = "crossfade"
+
+    # opacity curve for all transitions
+    if kind in {"fade_black", "crossfade", "wipe_left", "wipe_right", "push_left", "push_right", "slide_left", "slide_right", "slide_up", "slide_down", "zoom_in", "zoom_out"}:
+        mid = t0 + (t1 - t0) * (0.5 + softness * 0.15)
+        if easing == "linear":
+            item.opacity.enable_motion().extend(keyframes=[t0, t1], values=[op_from, op_to])
+        elif easing == "ease_in":
+            item.opacity.enable_motion().extend(keyframes=[t0, mid, t1], values=[op_from, op_from + (op_to - op_from) * 0.35, op_to])
+        elif easing == "ease_out":
+            item.opacity.enable_motion().extend(keyframes=[t0, mid, t1], values=[op_from, op_from + (op_to - op_from) * 0.75, op_to])
+        else:
+            item.opacity.enable_motion().extend(keyframes=[t0, mid, t1], values=[op_from, op_from + (op_to - op_from) * 0.5, op_to])
+
+    if not allow_spatial:
+        return
+
+    if kind in {"slide_left", "slide_right", "slide_up", "slide_down", "wipe_left", "wipe_right", "push_left", "push_right"}:
+        p0, p1 = _transition_motion_values(kind, entering, base_position, base_scale, width, height)
+        item.position.enable_motion().extend(keyframes=[t0, t1], values=[p0, p1], easings=[easing])
+    elif kind in {"zoom_in", "zoom_out"}:
+        s0, s1 = _transition_motion_values(kind, entering, base_position, base_scale, width, height)
+        item.scale.enable_motion().extend(keyframes=[t0, t1], values=[s0, s1], easings=[easing])
+
+
 def _smart_bgm_level(timeline: dict[str, Any], default_bgm_db: float = -12.0, duck_db: float = -18.0) -> float:
     """若存在前景音轨，则自动压低 BGM。"""
     bgm = timeline.get("bgm") or {}
@@ -385,7 +881,9 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
     )
     pbar.update(1)
 
-    for clip in timeline.get("video_tracks", []):
+    clips = timeline.get("video_tracks", [])
+    total_clips = len(clips)
+    for clip_index, clip in enumerate(clips):
         start = _safe_float(clip.get("start", 0.0), 0.0, min_value=0.0)
         clip_duration = _safe_float(clip.get("duration", 0.01), 0.01, min_value=0.01)
         source_start = _safe_float(clip.get("source_start", 0.0), 0.0, min_value=0.0)
@@ -405,6 +903,14 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
         opacity = _safe_float(clip.get("opacity", 1.0), 1.0, min_value=0.0, max_value=1.0)
         motion = clip.get("motion") if isinstance(clip.get("motion"), dict) else {}
         motion_applied_opacity = False
+        render_path = clip["path"]
+        if not bool(clip.get("is_image", False)):
+            clip_shaders = _iter_clip_shaders(clip)
+            if len(clip_shaders) > 0:
+                clip_for_shader = dict(clip)
+                clip_for_shader["path"] = render_path
+                clip_for_shader["clip_shaders"] = clip_shaders
+                render_path = _apply_clip_shaders_to_path(clip_for_shader)
 
         if clip.get("is_image", False):
             prepared_path = _prepare_image_for_canvas(
@@ -426,7 +932,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                 opacity=opacity,
             )
         else:
-            layer = mv.layer.Video(clip["path"], audio=bool(clip.get("use_source_audio", True)))
+            layer = mv.layer.Video(render_path, audio=bool(clip.get("use_source_audio", True)))
             item = scene.add_layer(
                 layer,
                 offset=start,
@@ -502,11 +1008,55 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                 )
                 motion_applied_opacity = True
 
-        if fade_in > 0 and not motion_applied_opacity:
+        transition_in = _resolve_clip_transition(timeline, clip, clip_index, total_clips, entering=True)
+        transition_out = _resolve_clip_transition(timeline, clip, clip_index, total_clips, entering=False)
+
+        if transition_in is not None:
+            _apply_transition(
+                item,
+                transition_in,
+                clip_duration,
+                position,
+                scale,
+                opacity,
+                width,
+                height,
+                entering=True,
+                allow_spatial=not bool(clip.get("is_image", False)),
+            )
+        elif fade_in > 0 and not motion_applied_opacity:
             item.opacity.enable_motion().extend(keyframes=[0.0, fade_in], values=[0.0, opacity])
-        if fade_out > 0 and not motion_applied_opacity:
+
+        if transition_out is not None:
+            _apply_transition(
+                item,
+                transition_out,
+                clip_duration,
+                position,
+                scale,
+                opacity,
+                width,
+                height,
+                entering=False,
+                allow_spatial=not bool(clip.get("is_image", False)),
+            )
+        elif fade_out > 0 and not motion_applied_opacity:
             t0 = max(0.0, clip_duration - fade_out)
             item.opacity.enable_motion().extend(keyframes=[t0, clip_duration], values=[opacity, 0.0])
+
+        for fx in _iter_clip_effects(clip):
+            _apply_clip_fx(
+                item,
+                fx,
+                clip_duration,
+                position,
+                scale,
+                rotation,
+                opacity,
+                width,
+                height,
+                clip_index,
+            )
         pbar.update(1)
 
     for track in timeline.get("audio_tracks", []):
@@ -654,6 +1204,13 @@ class MovisAddVideoTrack:
                 "scale_y": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 20.0, "tooltip": "垂直缩放倍数"}),
                 "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "tooltip": "旋转角度（度）"}),
                 "opacity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "tooltip": "透明度（0~1）"}),
+                "transition_in": (TRANSITION_TYPES, {"default": "none", "tooltip": "片段入场转场"}),
+                "transition_in_duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "transition_out": (TRANSITION_TYPES, {"default": "none", "tooltip": "片段出场转场"}),
+                "transition_out_duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "transition_easing": (TRANSITION_EASINGS, {"default": "ease_in_out"}),
+                "transition_softness": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "transition_custom_curve": ("STRING", {"default": "", "placeholder": "仅custom使用: 0:0,0.3:0.2,1:1"}),
             },
             "optional": {
                 "vhs_filenames": ("VHS_FILENAMES",),
@@ -665,7 +1222,7 @@ class MovisAddVideoTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_video"
 
-    def add_video(self, timeline, video_path, placement_mode, start, duration, source_start, fade_in, fade_out, use_source_audio, audio_level_db, position_x, position_y, scale_x, scale_y, rotation, opacity, vhs_filenames=None):
+    def add_video(self, timeline, video_path, placement_mode, start, duration, source_start, fade_in, fade_out, use_source_audio, audio_level_db, position_x, position_y, scale_x, scale_y, rotation, opacity, transition_in, transition_in_duration, transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve, vhs_filenames=None):
         t = _clone_timeline(timeline)
         path = _resolve_video_input(video_path, vhs_filenames=vhs_filenames)
         clip_duration = _safe_float(duration, 0.0, min_value=0.0)
@@ -690,6 +1247,8 @@ class MovisAddVideoTrack:
                 "scale_y": _safe_float(scale_y, 1.0, min_value=0.01, max_value=20.0),
                 "rotation": _safe_float(rotation, 0.0, min_value=-360.0, max_value=360.0),
                 "opacity": _safe_float(opacity, 1.0, min_value=0.0, max_value=1.0),
+                "transition_in": _make_transition(transition_in, transition_in_duration, transition_easing, transition_softness, transition_custom_curve),
+                "transition_out": _make_transition(transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve),
             }
         )
         return (t,)
@@ -712,6 +1271,13 @@ class MovisAddImageTrack:
                 "scale_y": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 20.0, "tooltip": "垂直缩放倍数"}),
                 "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "tooltip": "旋转角度（度）"}),
                 "opacity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "tooltip": "透明度（0~1）"}),
+                "transition_in": (TRANSITION_TYPES, {"default": "none", "tooltip": "片段入场转场"}),
+                "transition_in_duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "transition_out": (TRANSITION_TYPES, {"default": "none", "tooltip": "片段出场转场"}),
+                "transition_out_duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "transition_easing": (TRANSITION_EASINGS, {"default": "ease_in_out"}),
+                "transition_softness": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "transition_custom_curve": ("STRING", {"default": "", "placeholder": "仅custom使用: 0:0,0.3:0.2,1:1"}),
                 "image_scale_mode": (["transform_only", "contain", "cover", "center_inside", "stretch"], {"default": "transform_only", "tooltip": "图片适配画布策略"}),
                 "image_anchor_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "tooltip": "水平锚点；cover/contain时决定裁剪或摆放焦点"}),
                 "image_anchor_y": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "tooltip": "垂直锚点；cover/contain时决定裁剪或摆放焦点"}),
@@ -727,7 +1293,7 @@ class MovisAddImageTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_image"
 
-    def add_image(self, timeline, image_path, start, duration, fade_in, fade_out, position_x, position_y, scale_x, scale_y, rotation, opacity, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, image=None):
+    def add_image(self, timeline, image_path, start, duration, fade_in, fade_out, position_x, position_y, scale_x, scale_y, rotation, opacity, transition_in, transition_in_duration, transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, image=None):
         t = _clone_timeline(timeline)
         path = _resolve_image_input(image_path, image=image, prefix="movis_add_image")
         t["video_tracks"].append(
@@ -747,6 +1313,8 @@ class MovisAddImageTrack:
                 "scale_y": _safe_float(scale_y, 1.0, min_value=0.01, max_value=20.0),
                 "rotation": _safe_float(rotation, 0.0, min_value=-360.0, max_value=360.0),
                 "opacity": _safe_float(opacity, 1.0, min_value=0.0, max_value=1.0),
+                "transition_in": _make_transition(transition_in, transition_in_duration, transition_easing, transition_softness, transition_custom_curve),
+                "transition_out": _make_transition(transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve),
                 "image_scale_mode": str(image_scale_mode),
                 "image_anchor_x": _safe_float(image_anchor_x, 0.5, min_value=0.0, max_value=1.0),
                 "image_anchor_y": _safe_float(image_anchor_y, 0.5, min_value=0.0, max_value=1.0),
@@ -1493,6 +2061,337 @@ class MovisSmartMerge:
             ta["bgm"]["audio_level_db"] = _smart_bgm_level(ta, default_bgm_db=float(ta["bgm"].get("audio_level_db", -12.0)), duck_db=float(duck_db))
 
         return (ta, float(offset_b), float(_timeline_duration(ta)))
+
+
+class MovisSetGlobalTransition:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "transition": (TRANSITION_TYPES, {"default": "crossfade", "tooltip": "全局转场类型"}),
+                "duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "easing": (TRANSITION_EASINGS, {"default": "ease_in_out"}),
+                "softness": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "custom_curve": ("STRING", {"default": "", "placeholder": "仅custom使用: 0:0,0.3:0.2,1:1"}),
+                "apply_to_first": ("BOOLEAN", {"default": False}),
+                "apply_to_last": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "set_global_transition"
+
+    def set_global_transition(self, timeline, transition, duration, easing, softness, custom_curve, apply_to_first, apply_to_last):
+        t = _clone_timeline(timeline)
+        tr = _make_transition(transition, duration, easing, softness, custom_curve)
+        if tr is None:
+            t.pop("global_transition", None)
+        else:
+            tr["apply_to_first"] = bool(apply_to_first)
+            tr["apply_to_last"] = bool(apply_to_last)
+            t["global_transition"] = tr
+        return (t,)
+
+
+class MovisSetClipTransition:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999}),
+                "set_in": ("BOOLEAN", {"default": True}),
+                "transition_in": (TRANSITION_TYPES, {"default": "crossfade"}),
+                "transition_in_duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "set_out": ("BOOLEAN", {"default": True}),
+                "transition_out": (TRANSITION_TYPES, {"default": "crossfade"}),
+                "transition_out_duration": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0}),
+                "easing": (TRANSITION_EASINGS, {"default": "ease_in_out"}),
+                "softness": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "custom_curve": ("STRING", {"default": "", "placeholder": "仅custom使用: 0:0,0.3:0.2,1:1"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "set_clip_transition"
+
+    def set_clip_transition(self, timeline, clip_index, set_in, transition_in, transition_in_duration, set_out, transition_out, transition_out_duration, easing, softness, custom_curve):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        if set_in:
+            clips[idx]["transition_in"] = _make_transition(transition_in, transition_in_duration, easing, softness, custom_curve)
+        if set_out:
+            clips[idx]["transition_out"] = _make_transition(transition_out, transition_out_duration, easing, softness, custom_curve)
+        return (t,)
+
+
+class MovisAddClipFX:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999, "tooltip": "目标视频片段索引，-1 表示最后一段"}),
+                "effect": (FX_TYPES, {"default": "glitch", "tooltip": "特效类型（近似 shader 风格）"}),
+                "start_norm": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "tooltip": "特效开始时间（片段归一化）"}),
+                "end_norm": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "tooltip": "特效结束时间（片段归一化）"}),
+                "intensity": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0, "tooltip": "特效强度"}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 20.0, "tooltip": "特效速度"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647, "tooltip": "随机种子"}),
+                "replace_existing": ("BOOLEAN", {"default": False, "tooltip": "是否替换该片段已有特效"}),
+                "custom_curve": ("STRING", {"default": "", "placeholder": "仅 custom 推荐：0:0.5,0.2:1,0.8:0,1:0.5"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "add_fx"
+
+    def add_fx(self, timeline, clip_index, effect, start_norm, end_norm, intensity, speed, seed, replace_existing, custom_curve):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        fx = _make_fx(effect, start_norm, end_norm, intensity, speed, seed, custom_curve)
+        if fx is None:
+            return (t,)
+        if bool(replace_existing):
+            clips[idx]["effects"] = [fx]
+        else:
+            existing = clips[idx].get("effects")
+            if not isinstance(existing, list):
+                existing = []
+            existing.append(fx)
+            clips[idx]["effects"] = existing
+        return (t,)
+
+
+class MovisApplyFXPreset:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999, "tooltip": "目标视频片段索引，-1 表示最后一段"}),
+                "preset": (FX_PRESETS, {"default": "cyber_glitch", "tooltip": "预设：一键酷炫效果"}),
+                "strength": ("FLOAT", {"default": 0.85, "min": 0.05, "max": 2.0, "tooltip": "预设强度"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+                "replace_existing": ("BOOLEAN", {"default": False, "tooltip": "是否替换已有特效"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "apply_preset"
+
+    def apply_preset(self, timeline, clip_index, preset, strength, seed, replace_existing):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        fx_list = [x for x in _build_fx_preset(preset, strength, seed) if isinstance(x, dict)]
+        if len(fx_list) == 0:
+            return (t,)
+        if bool(replace_existing):
+            clips[idx]["effects"] = fx_list
+        else:
+            existing = clips[idx].get("effects")
+            if not isinstance(existing, list):
+                existing = []
+            existing.extend(fx_list)
+            clips[idx]["effects"] = existing
+        return (t,)
+
+
+class MovisSetClipShader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999, "tooltip": "目标视频片段索引，-1 表示最后一段"}),
+                "shader_path": ("STRING", {"default": "", "placeholder": "GLSL shader 文件路径（可空）"}),
+                "shader_code": ("STRING", {"default": "", "multiline": True, "placeholder": "可直接粘贴 GLSL 代码；非空时优先于 shader_path"}),
+                "backend": (GPU_SHADER_BACKENDS, {"default": "libplacebo_vulkan"}),
+                "codec": (GPU_SHADER_CODECS, {"default": "libx264"}),
+                "keep_audio": ("BOOLEAN", {"default": True, "tooltip": "clip 预处理时是否保留原音频"}),
+                "replace_existing": ("BOOLEAN", {"default": False, "tooltip": "是否替换该片段已有 clip shader"}),
+                "enabled": ("BOOLEAN", {"default": True, "tooltip": "关闭后保留配置但本次不生效"}),
+                "output_file_prefix": ("STRING", {"default": "movis_clip_shader_", "tooltip": "clip shader 临时输出前缀"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "set_clip_shader"
+
+    def set_clip_shader(self, timeline, clip_index, shader_path, shader_code, backend, codec, keep_audio, replace_existing, enabled, output_file_prefix):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        shader = _normalize_clip_shader_entry({
+            "shader_path": shader_path,
+            "shader_code": shader_code,
+            "backend": backend,
+            "codec": codec,
+            "keep_audio": keep_audio,
+            "enabled": enabled,
+            "output_file_prefix": output_file_prefix,
+        })
+        if shader is None:
+            return (t,)
+        existing = clips[idx].get("clip_shaders")
+        if not isinstance(existing, list) or bool(replace_existing):
+            existing = []
+        existing.append(shader)
+        clips[idx]["clip_shaders"] = existing
+        return (t,)
+
+
+class MovisGPUShaderRender:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_path": ("STRING", {"default": "", "placeholder": "可留空，改接 VHS_FILENAMES"}),
+                "shader_path": ("STRING", {"default": "", "placeholder": "GLSL shader 文件路径（可空）"}),
+                "shader_code": ("STRING", {"default": "", "multiline": True, "placeholder": "可直接粘贴 GLSL 代码；非空时优先于 shader_path"}),
+                "backend": (GPU_SHADER_BACKENDS, {"default": "libplacebo_vulkan"}),
+                "codec": (GPU_SHADER_CODECS, {"default": "libx264"}),
+                "keep_audio": ("BOOLEAN", {"default": True}),
+                "output_file_prefix": ("STRING", {"default": "movis_gpu_shader_"}),
+                "notify_all": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "vhs_filenames": ("VHS_FILENAMES",),
+            },
+        }
+
+    RETURN_TYPES = ("VHS_FILENAMES", "STRING", "AUDIO", "INT", "FLOAT")
+    RETURN_NAMES = ("filenames", "video_path", "audio", "frames", "duration")
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "render_shader"
+    OUTPUT_NODE = True
+
+    def render_shader(self, video_path, shader_path, shader_code, backend, codec, keep_audio, output_file_prefix, notify_all, vhs_filenames=None):
+        src_video = _resolve_video_input(video_path, vhs_filenames=vhs_filenames)
+        shader_file = _resolve_shader_file(shader_path, shader_code, prefix="movis_gpu_shader")
+        out_path = _apply_gpu_shader_ffmpeg(
+            input_video_path=src_video,
+            shader_file_path=shader_file,
+            output_file_prefix=output_file_prefix,
+            backend=backend,
+            codec=codec,
+            keep_audio=bool(keep_audio),
+        )
+        duration = _safe_float(_video_duration(out_path), 0.01, min_value=0.01)
+        frames = max(1, int(round(duration * 30.0)))
+        try:
+            audio = get_audio(out_path)
+        except Exception:
+            audio = {
+                "waveform": torch.zeros((1, 2, 0), dtype=torch.float32),
+                "sample_rate": 44100,
+            }
+        if notify_all and notifyAll:
+            notifyAll(out_path, "movis_gpu_shader")
+        return {
+            "ui": {"video_path": out_path, "frames": [frames]},
+            "result": ((True, [out_path]), out_path, audio, frames, duration),
+        }
+
+
+class MovisTrimClip:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999}),
+                "new_source_start": ("FLOAT", {"default": 0.0, "min": 0.0}),
+                "new_duration": ("FLOAT", {"default": 0.0, "min": 0.0, "tooltip": "0 表示保持原时长"}),
+                "shift_following": ("BOOLEAN", {"default": False, "tooltip": "是否整体平移后续片段保持无缝"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "trim_clip"
+
+    def trim_clip(self, timeline, clip_index, new_source_start, new_duration, shift_following):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        if len(clips) == 0:
+            return (t,)
+        idx = int(clip_index)
+        if idx < 0:
+            idx = len(clips) + idx
+        idx = max(0, min(len(clips) - 1, idx))
+
+        old_duration = _safe_float(clips[idx].get("duration", 0.01), 0.01, min_value=0.01)
+        clips[idx]["source_start"] = _safe_float(new_source_start, 0.0, min_value=0.0)
+        if _safe_float(new_duration, 0.0, min_value=0.0) > 0:
+            clips[idx]["duration"] = _safe_float(new_duration, old_duration, min_value=0.01)
+        new_d = _safe_float(clips[idx].get("duration", old_duration), old_duration, min_value=0.01)
+        delta = new_d - old_duration
+        if shift_following and abs(delta) > 1e-8:
+            base_start = _safe_float(clips[idx].get("start", 0.0), 0.0)
+            for i, c in enumerate(clips):
+                if i != idx and _safe_float(c.get("start", 0.0), 0.0) > base_start:
+                    c["start"] = _safe_float(c.get("start", 0.0), 0.0) + delta
+        return (t,)
+
+
+class MovisDeleteClip:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999}),
+                "compact_timeline": ("BOOLEAN", {"default": False, "tooltip": "删除后是否将后续片段左移填补空隙"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "delete_clip"
+
+    def delete_clip(self, timeline, clip_index, compact_timeline):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        if len(clips) == 0:
+            return (t,)
+        idx = int(clip_index)
+        if idx < 0:
+            idx = len(clips) + idx
+        idx = max(0, min(len(clips) - 1, idx))
+        removed = clips.pop(idx)
+        if compact_timeline:
+            removed_start = _safe_float(removed.get("start", 0.0), 0.0)
+            removed_duration = _safe_float(removed.get("duration", 0.0), 0.0, min_value=0.0)
+            for c in clips:
+                cs = _safe_float(c.get("start", 0.0), 0.0)
+                if cs >= removed_start:
+                    c["start"] = cs - removed_duration
+        return (t,)
 
 
 class MovisTimelinePro:
