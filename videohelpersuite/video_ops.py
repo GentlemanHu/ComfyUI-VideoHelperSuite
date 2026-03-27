@@ -428,6 +428,398 @@ GPU_SHADER_CODECS = ["libx264", "h264_nvenc", "hevc_nvenc"]
 GPU_SHADER_BACKENDS = ["libplacebo_vulkan"]
 
 
+def _get_motion_object(item, prop: str):
+    if prop == "position":
+        return item.position.enable_motion()
+    if prop == "scale":
+        return item.scale.enable_motion()
+    if prop == "rotation":
+        return item.rotation.enable_motion()
+    if prop == "opacity":
+        return item.opacity.enable_motion()
+    raise ValueError(f"Unsupported motion prop: {prop}")
+
+
+def _safe_times(times, eps: float = 1e-4) -> list[float]:
+    out: list[float] = []
+    last = None
+    for t in times:
+        tt = float(t)
+        if last is not None and tt <= last:
+            tt = last + eps
+        out.append(tt)
+        last = tt
+    return out
+
+
+def _extend_motion_safe(item, prop: str, keyframes, values, easings=None, clear: bool = False, eps: float = 1e-4):
+    motion = _get_motion_object(item, prop)
+    if clear:
+        motion.clear()
+    times = _safe_times([float(t) for t in keyframes], eps=eps)
+
+    existing = set()
+    try:
+        for k in getattr(motion, "keyframes", []):
+            existing.add(round(float(k), 6))
+    except Exception:
+        pass
+
+    adjusted = []
+    for t in times:
+        tt = float(t)
+        while round(tt, 6) in existing:
+            tt += eps
+        adjusted.append(tt)
+        existing.add(round(tt, 6))
+
+    if easings is not None:
+        return motion.extend(keyframes=adjusted, values=values, easings=easings)
+    return motion.extend(keyframes=adjusted, values=values)
+
+
+def _lerp(a, b, x: float):
+    return a + (b - a) * x
+
+
+def _lerp_tuple(a, b, x: float):
+    return tuple(_lerp(float(aa), float(bb), x) for aa, bb in zip(a, b))
+
+
+def _ease_progress(kind: str, x: float) -> float:
+    x = max(0.0, min(1.0, float(x)))
+    k = str(kind or "linear").strip().lower()
+    if k == "ease_in":
+        return x * x
+    if k == "ease_out":
+        return 1.0 - (1.0 - x) * (1.0 - x)
+    if k == "ease_in_out":
+        if x < 0.5:
+            return 2.0 * x * x
+        return 1.0 - 2.0 * (1.0 - x) * (1.0 - x)
+    return x
+
+
+def _interp_piecewise(times: list[float], values: list[Any], t: float, easings: list[str] | None = None):
+    if len(times) == 0 or len(values) == 0:
+        return None
+    if len(times) == 1 or len(values) == 1:
+        return values[0]
+    if t <= float(times[0]):
+        return values[0]
+    if t >= float(times[-1]):
+        return values[-1]
+    for i in range(len(times) - 1):
+        t0 = float(times[i])
+        t1 = float(times[i + 1])
+        if t0 <= t <= t1:
+            p = 0.0 if t1 <= t0 else (float(t) - t0) / (t1 - t0)
+            if easings and i < len(easings):
+                p = _ease_progress(easings[i], p)
+            a = values[i]
+            b = values[i + 1]
+            if isinstance(a, tuple):
+                return _lerp_tuple(a, b, p)
+            return float(_lerp(float(a), float(b), p))
+    return values[-1]
+
+
+def _sample_motion_property(clip: dict[str, Any], prop: str, t: float, default_value, width: int, height: int):
+    motion = clip.get("motion") if isinstance(clip.get("motion"), dict) else None
+    if not motion:
+        return default_value
+    keyframe_times = motion.get("keyframe_times")
+    if not isinstance(keyframe_times, list) or len(keyframe_times) < 2:
+        return default_value
+    norm_times = [max(0.0, min(1.0, float(x))) for x in keyframe_times]
+    clip_duration = max(1e-4, float(clip.get("duration", 0.01)))
+    abs_times = [clip_duration * nt for nt in norm_times]
+    easings = [str(x) for x in motion.get("easings", [])] if isinstance(motion.get("easings"), list) else None
+
+    if prop == "position":
+        px = motion.get("position_x", []) if isinstance(motion.get("position_x"), list) else []
+        py = motion.get("position_y", []) if isinstance(motion.get("position_y"), list) else []
+        if not px and not py:
+            return default_value
+        vals = []
+        base_x = clip.get("position_x", 0.5)
+        base_y = clip.get("position_y", 0.5)
+        for i in range(len(abs_times)):
+            raw_x = px[i] if i < len(px) else base_x
+            raw_y = py[i] if i < len(py) else base_y
+            vals.append(_position_to_pixels(raw_x, raw_y, width, height))
+        return _interp_piecewise(abs_times, vals, t, easings) or default_value
+
+    source = motion.get(prop, []) if isinstance(motion.get(prop), list) else []
+    if prop in {"scale_x", "scale_y"}:
+        return default_value
+    if prop == "scale":
+        sx = motion.get("scale_x", []) if isinstance(motion.get("scale_x"), list) else []
+        sy = motion.get("scale_y", []) if isinstance(motion.get("scale_y"), list) else []
+        if not sx and not sy:
+            return default_value
+        vals = []
+        base_x = clip.get("scale_x", default_value[0])
+        base_y = clip.get("scale_y", default_value[1])
+        for i in range(len(abs_times)):
+            x = _safe_float(sx[i], base_x, min_value=0.01, max_value=20.0) if i < len(sx) else _safe_float(base_x, default_value[0], min_value=0.01, max_value=20.0)
+            y = _safe_float(sy[i], base_y, min_value=0.01, max_value=20.0) if i < len(sy) else _safe_float(base_y, default_value[1], min_value=0.01, max_value=20.0)
+            vals.append((x, y))
+        return _interp_piecewise(abs_times, vals, t, easings) or default_value
+    if prop == "rotation":
+        if not source:
+            source = motion.get("rotation", []) if isinstance(motion.get("rotation"), list) else []
+        if not source:
+            return default_value
+        vals = [_safe_float(source[i], clip.get("rotation", default_value), min_value=-360.0, max_value=360.0) if i < len(source) else default_value for i in range(len(abs_times))]
+        return _interp_piecewise(abs_times, vals, t, easings) or default_value
+    if prop == "opacity":
+        source = motion.get("opacity", []) if isinstance(motion.get("opacity"), list) else []
+        if not source:
+            return default_value
+        vals = [_safe_float(source[i], clip.get("opacity", default_value), min_value=0.0, max_value=1.0) if i < len(source) else default_value for i in range(len(abs_times))]
+        return _interp_piecewise(abs_times, vals, t, easings) or default_value
+    return default_value
+
+
+def _effect_weight(effect: dict[str, Any], t: float, clip_duration: float) -> float:
+    start_norm = _safe_float(effect.get("start_norm", 0.0), 0.0, min_value=0.0, max_value=1.0)
+    end_norm = _safe_float(effect.get("end_norm", 1.0), 1.0, min_value=0.0, max_value=1.0)
+    t0 = float(clip_duration) * start_norm
+    t1 = float(clip_duration) * max(start_norm + 1e-4, end_norm)
+    if t < t0 or t > t1:
+        return 0.0
+    p = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+    return np.sin(np.pi * max(0.0, min(1.0, p)))
+
+
+def _noise1(seed: float, x: float) -> float:
+    return float(np.sin(x * 12.9898 + seed * 78.233) * np.cos(x * 4.123 + seed * 3.17))
+
+
+def _sample_effect_contribution(effect: dict[str, Any], t: float, clip_duration: float, width: int, height: int, clip_index: int):
+    kind = str(effect.get("type", "none")).strip().lower()
+    if kind == "none":
+        return (0.0, 0.0), (1.0, 1.0), 0.0, 1.0
+    w = _effect_weight(effect, t, clip_duration)
+    if w <= 0.0:
+        return (0.0, 0.0), (1.0, 1.0), 0.0, 1.0
+
+    intensity = _safe_float(effect.get("intensity", 0.5), 0.5, min_value=0.0, max_value=2.0)
+    speed = _safe_float(effect.get("speed", 1.0), 1.0, min_value=0.05, max_value=20.0)
+    seed = int(effect.get("seed", 0)) + int(clip_index)
+    phase = float(t) * speed
+
+    if kind == "shake":
+        amp = min(width, height) * 0.006 * intensity * w
+        dx = amp * _noise1(seed + 1.0, phase * 7.0)
+        dy = amp * _noise1(seed + 2.0, phase * 9.0 + 3.0)
+        return (dx, dy), (1.0, 1.0), 0.0, 1.0
+
+    if kind == "zoom_pulse":
+        amp = 0.03 * intensity * w
+        k = 1.0 + amp * np.sin(phase * np.pi * 2.0)
+        return (0.0, 0.0), (float(k), float(k)), 0.0, 1.0
+
+    if kind == "strobe":
+        hz = max(2.0, speed * 8.0)
+        gate = 1.0 if int(np.floor((t + seed * 0.001) * hz)) % 2 == 0 else max(0.0, 1.0 - 0.75 * intensity)
+        alpha_mult = float(_lerp(1.0, gate, w))
+        return (0.0, 0.0), (1.0, 1.0), 0.0, alpha_mult
+
+    if kind == "drift":
+        dx = width * 0.04 * intensity * w * np.sin(phase * np.pi)
+        dy = -height * 0.02 * intensity * w * np.sin(phase * np.pi)
+        return (float(dx), float(dy)), (1.0, 1.0), 0.0, 1.0
+
+    if kind == "spin_wiggle":
+        deg = 8.0 * intensity * w * np.sin(phase * np.pi * 2.0)
+        return (0.0, 0.0), (1.0, 1.0), float(deg), 1.0
+
+    if kind in {"glitch", "custom"}:
+        amp = min(width, height) * 0.008 * intensity * w
+        dx = amp * _noise1(seed + 3.0, phase * 11.0)
+        dy = amp * _noise1(seed + 4.0, phase * 13.0 + 1.2)
+        rot = 3.5 * intensity * w * _noise1(seed + 5.0, phase * 5.0)
+        alpha_mult = max(0.0, 1.0 - 0.45 * intensity * w * (0.5 + 0.5 * _noise1(seed + 6.0, phase * 17.0)))
+        if kind == "custom":
+            parsed = _parse_custom_curve(str(effect.get("custom_curve", "")))
+            if parsed:
+                ts, vs = parsed
+                start_norm = _safe_float(effect.get("start_norm", 0.0), 0.0, min_value=0.0, max_value=1.0)
+                end_norm = _safe_float(effect.get("end_norm", 1.0), 1.0, min_value=0.0, max_value=1.0)
+                t0 = float(clip_duration) * start_norm
+                t1 = float(clip_duration) * max(start_norm + 1e-4, end_norm)
+                local_p = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+                vv = _interp_piecewise(ts, vs, local_p, None)
+                if vv is not None:
+                    dx = (float(vv) - 0.5) * 2.0 * amp
+                    dy = (0.5 - float(vv)) * 2.0 * amp
+        return (float(dx), float(dy)), (1.0, 1.0), float(rot), float(alpha_mult)
+
+    return (0.0, 0.0), (1.0, 1.0), 0.0, 1.0
+
+
+def _collect_advanced_sample_times(clip: dict[str, Any], clip_duration: float, fps: float, transitions: list[dict[str, Any]]):
+    base_rate = min(max(float(fps) * 2.0, 24.0), 120.0)
+    steps = max(12, int(np.ceil(float(clip_duration) * base_rate)) + 1)
+    times = set(float(x) for x in np.linspace(0.0, float(clip_duration), steps))
+    times.update([0.0, float(clip_duration)])
+
+    motion = clip.get("motion") if isinstance(clip.get("motion"), dict) else None
+    if motion and isinstance(motion.get("keyframe_times"), list):
+        for nt in motion.get("keyframe_times", []):
+            times.add(max(0.0, min(float(clip_duration), float(clip_duration) * max(0.0, min(1.0, float(nt))))))
+
+    for tr in transitions:
+        if not tr:
+            continue
+        dur = min(float(clip_duration), _safe_float(tr.get("duration", 0.0), 0.0, min_value=0.0))
+        if dur <= 0:
+            continue
+        times.update([0.0, dur, max(0.0, float(clip_duration) - dur), float(clip_duration)])
+
+    effects = clip.get("advanced_fx_layers", [])
+    if isinstance(effects, list):
+        for fx in effects:
+            if not isinstance(fx, dict):
+                continue
+            s = _safe_float(fx.get("start_norm", 0.0), 0.0, min_value=0.0, max_value=1.0)
+            e = _safe_float(fx.get("end_norm", 1.0), 1.0, min_value=0.0, max_value=1.0)
+            t0 = float(clip_duration) * s
+            t1 = float(clip_duration) * max(s + 1e-4, e)
+            tm = t0 + (t1 - t0) * 0.5
+            times.update([t0, tm, t1])
+
+    return sorted(times)
+
+
+def _compute_transition_state(transition: dict[str, Any] | None, t: float, clip_duration: float, base_position: tuple[float, float], base_scale: tuple[float, float], base_opacity: float, width: int, height: int, entering: bool):
+    pos = base_position
+    scale = base_scale
+    opacity = base_opacity
+    if not transition or str(transition.get("type", "none")) == "none":
+        return pos, scale, opacity
+
+    kind = str(transition.get("type", "none"))
+    dur = min(float(clip_duration), _safe_float(transition.get("duration", 0.0), 0.0, min_value=0.0))
+    if dur <= 0:
+        return pos, scale, opacity
+    easing = str(transition.get("easing", "ease_in_out"))
+    softness = _safe_float(transition.get("softness", 0.5), 0.5, min_value=0.0, max_value=1.0)
+    custom_curve = str(transition.get("custom_curve", ""))
+
+    if entering:
+        if t > dur:
+            return pos, scale, opacity
+        p = 0.0 if dur <= 0 else t / dur
+    else:
+        t0 = max(0.0, float(clip_duration) - dur)
+        if t < t0:
+            return pos, scale, opacity
+        p = 1.0 if dur <= 0 else (t - t0) / dur
+
+    if kind == "custom":
+        parsed = _parse_custom_curve(custom_curve)
+        if parsed:
+            ts, vs = parsed
+            v = _interp_piecewise(ts, vs, p, None)
+            if v is not None:
+                opacity = float(base_opacity) * float(v)
+            return pos, scale, opacity
+        kind = "crossfade"
+
+    if easing == "linear":
+        op_progress = p
+    elif easing == "ease_in":
+        op_progress = _ease_progress("ease_in", p)
+    elif easing == "ease_out":
+        op_progress = _ease_progress("ease_out", p)
+    else:
+        mid_p = 0.5 + softness * 0.15
+        if p < mid_p:
+            op_progress = 0.5 * _ease_progress("ease_in", p / max(1e-4, mid_p))
+        else:
+            op_progress = 0.5 + 0.5 * _ease_progress("ease_out", (p - mid_p) / max(1e-4, 1.0 - mid_p))
+
+    opacity = float(_lerp(0.0, base_opacity, op_progress) if entering else _lerp(base_opacity, 0.0, op_progress))
+
+    if kind in {"slide_left", "wipe_left", "push_left", "slide_right", "wipe_right", "push_right", "slide_up", "slide_down"}:
+        p0, p1 = _transition_motion_values(kind, entering, base_position, base_scale, width, height)
+        pos = _lerp_tuple(p0, p1, _ease_progress(easing, p))
+    elif kind in {"zoom_in", "zoom_out"}:
+        s0, s1 = _transition_motion_values(kind, entering, base_position, base_scale, width, height)
+        scale = _lerp_tuple(s0, s1, _ease_progress(easing, p))
+    return pos, scale, opacity
+
+
+def _apply_advanced_clip_animation(item, timeline: dict[str, Any], clip: dict[str, Any], clip_duration: float, base_position: tuple[float, float], base_scale: tuple[float, float], base_rotation: float, base_opacity: float, width: int, height: int, fps: float, clip_index: int, total_clips: int):
+    transition_in = _resolve_clip_transition(timeline, clip, clip_index, total_clips, entering=True)
+    transition_out = _resolve_clip_transition(timeline, clip, clip_index, total_clips, entering=False)
+    times = _collect_advanced_sample_times(clip, clip_duration, fps, [transition_in, transition_out])
+
+    pos_vals = []
+    scale_vals = []
+    rot_vals = []
+    op_vals = []
+
+    fx_layers = clip.get("advanced_fx_layers", [])
+    if not isinstance(fx_layers, list):
+        fx_layers = []
+
+    for t in times:
+        pos = _sample_motion_property(clip, "position", t, base_position, width, height)
+        scl = _sample_motion_property(clip, "scale", t, base_scale, width, height)
+        rot = _sample_motion_property(clip, "rotation", t, base_rotation, width, height)
+        op = _sample_motion_property(clip, "opacity", t, base_opacity, width, height)
+
+        pos, scl, op = _compute_transition_state(transition_in, t, clip_duration, pos, scl, op, width, height, entering=True)
+        pos, scl, op = _compute_transition_state(transition_out, t, clip_duration, pos, scl, op, width, height, entering=False)
+
+        if transition_in is None and _safe_float(clip.get("fade_in", 0.0), 0.0, min_value=0.0) > 0.0:
+            fin = min(float(clip_duration), _safe_float(clip.get("fade_in", 0.0), 0.0, min_value=0.0))
+            if t <= fin:
+                op *= (t / max(1e-4, fin))
+        if transition_out is None and _safe_float(clip.get("fade_out", 0.0), 0.0, min_value=0.0) > 0.0:
+            fout = min(float(clip_duration), _safe_float(clip.get("fade_out", 0.0), 0.0, min_value=0.0))
+            t0 = max(0.0, float(clip_duration) - fout)
+            if t >= t0:
+                op *= max(0.0, 1.0 - ((t - t0) / max(1e-4, fout)))
+
+        total_dx = 0.0
+        total_dy = 0.0
+        total_rot = 0.0
+        total_op_mult = 1.0
+        scale_mult_x = 1.0
+        scale_mult_y = 1.0
+        for fx in fx_layers:
+            if not isinstance(fx, dict):
+                continue
+            (dx, dy), (mx, my), drot, op_mult = _sample_effect_contribution(fx, t, clip_duration, width, height, clip_index)
+            total_dx += dx
+            total_dy += dy
+            scale_mult_x *= mx
+            scale_mult_y *= my
+            total_rot += drot
+            total_op_mult *= op_mult
+
+        pos = (float(pos[0] + total_dx), float(pos[1] + total_dy))
+        scl = (float(scl[0] * scale_mult_x), float(scl[1] * scale_mult_y))
+        rot = float(rot + total_rot)
+        op = float(max(0.0, min(1.0, op * total_op_mult)))
+
+        pos_vals.append(pos)
+        scale_vals.append(scl)
+        rot_vals.append(rot)
+        op_vals.append(op)
+
+    _extend_motion_safe(item, "position", times, pos_vals, clear=True)
+    _extend_motion_safe(item, "scale", times, scale_vals, clear=True)
+    _extend_motion_safe(item, "rotation", times, rot_vals, clear=True)
+    _extend_motion_safe(item, "opacity", times, op_vals, clear=True)
+
+
+
 def _escape_ffmpeg_filter_path(path: str) -> str:
     p = str(Path(path).resolve()).replace("\\", "/")
     p = p.replace(":", "\\:").replace("'", "\\'")
@@ -495,65 +887,6 @@ def _apply_gpu_shader_ffmpeg(input_video_path: str, shader_file_path: str, outpu
             f"stderr:\n{res.stderr.strip()}"
         )
     return out_path
-
-
-
-
-def _normalize_clip_shader_entry(shader: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(shader, dict):
-        return None
-    shader_code = str(shader.get("shader_code", "") or "")
-    shader_path = str(shader.get("shader_path", "") or "")
-    if not shader_code.strip() and not shader_path.strip():
-        return None
-    backend = str(shader.get("backend", "libplacebo_vulkan") or "libplacebo_vulkan").strip().lower()
-    if backend not in GPU_SHADER_BACKENDS:
-        backend = "libplacebo_vulkan"
-    codec = str(shader.get("codec", "libx264") or "libx264").strip().lower()
-    if codec not in GPU_SHADER_CODECS:
-        codec = "libx264"
-    return {
-        "shader_path": shader_path,
-        "shader_code": shader_code,
-        "backend": backend,
-        "codec": codec,
-        "keep_audio": bool(shader.get("keep_audio", True)),
-        "output_file_prefix": str(shader.get("output_file_prefix", "movis_clip_shader_") or "movis_clip_shader_"),
-        "enabled": bool(shader.get("enabled", True)),
-    }
-
-
-def _iter_clip_shaders(clip: dict[str, Any]) -> list[dict[str, Any]]:
-    shaders = clip.get("clip_shaders")
-    if not isinstance(shaders, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for shader in shaders:
-        normalized = _normalize_clip_shader_entry(shader)
-        if normalized is not None and bool(normalized.get("enabled", True)):
-            out.append(normalized)
-    return out
-
-
-def _apply_clip_shaders_to_path(clip: dict[str, Any]) -> str:
-    current_path = str(clip.get("path", "") or "")
-    if not current_path:
-        raise ValueError("clip 缺少 path，无法应用 clip shader")
-    for shader in _iter_clip_shaders(clip):
-        shader_file = _resolve_shader_file(
-            shader.get("shader_path", ""),
-            shader.get("shader_code", ""),
-            prefix="movis_clip_shader",
-        )
-        current_path = _apply_gpu_shader_ffmpeg(
-            input_video_path=current_path,
-            shader_file_path=shader_file,
-            output_file_prefix=str(shader.get("output_file_prefix", "movis_clip_shader_") or "movis_clip_shader_"),
-            backend=str(shader.get("backend", "libplacebo_vulkan") or "libplacebo_vulkan"),
-            codec=str(shader.get("codec", "libx264") or "libx264"),
-            keep_audio=bool(shader.get("keep_audio", True)),
-        )
-    return current_path
 
 
 def _make_transition(kind: str, duration: float, easing: str = "ease_in_out", softness: float = 0.5, custom_curve: str = "") -> dict[str, Any] | None:
@@ -654,7 +987,7 @@ def _apply_clip_fx(item, effect: dict[str, Any], clip_duration: float, base_posi
         steps = max(6, int(fx_dur * 18.0 * speed))
         times = np.linspace(t0, t1, steps)
         vals = [(float(x0 + rng.uniform(-amp, amp)), float(y0 + rng.uniform(-amp, amp))) for _ in range(steps - 1)] + [base_position]
-        item.position.enable_motion().extend(keyframes=[float(t) for t in times], values=vals)
+        _extend_motion_safe(item, "position", [float(t) for t in times], vals)
         return
 
     if kind == "zoom_pulse":
@@ -667,7 +1000,7 @@ def _apply_clip_fx(item, effect: dict[str, Any], clip_duration: float, base_posi
             k = 1.0 + amp * float(phase)
             vals.append((float(sx0 * k), float(sy0 * k)))
         vals[-1] = base_scale
-        item.scale.enable_motion().extend(keyframes=[float(t) for t in times], values=vals)
+        _extend_motion_safe(item, "scale", [float(t) for t in times], vals)
         return
 
     if kind == "strobe":
@@ -677,24 +1010,28 @@ def _apply_clip_fx(item, effect: dict[str, Any], clip_duration: float, base_posi
         low = max(0.0, base_opacity * (1.0 - 0.75 * intensity))
         vals = [float(base_opacity if i % 2 == 0 else low) for i in range(steps)]
         vals[-1] = float(base_opacity)
-        item.opacity.enable_motion().extend(keyframes=[float(t) for t in times], values=vals)
+        _extend_motion_safe(item, "opacity", [float(t) for t in times], vals)
         return
 
     if kind == "drift":
         dx = width * 0.04 * intensity
         dy = height * 0.02 * intensity
-        item.position.enable_motion().extend(
-            keyframes=[t0, t0 + fx_dur * 0.5, t1],
-            values=[base_position, (x0 + dx, y0 - dy), base_position],
+        _extend_motion_safe(
+            item,
+            "position",
+            [t0, t0 + fx_dur * 0.5, t1],
+            [base_position, (x0 + dx, y0 - dy), base_position],
             easings=["ease_out", "ease_in"],
         )
         return
 
     if kind == "spin_wiggle":
         deg = 8.0 * intensity
-        item.rotation.enable_motion().extend(
-            keyframes=[t0, t0 + fx_dur * 0.25, t0 + fx_dur * 0.5, t0 + fx_dur * 0.75, t1],
-            values=[base_rotation, base_rotation + deg, base_rotation - deg, base_rotation + deg * 0.4, base_rotation],
+        _extend_motion_safe(
+            item,
+            "rotation",
+            [t0, t0 + fx_dur * 0.25, t0 + fx_dur * 0.5, t0 + fx_dur * 0.75, t1],
+            [base_rotation, base_rotation + deg, base_rotation - deg, base_rotation + deg * 0.4, base_rotation],
             easings=["ease_out", "linear", "linear", "ease_in"],
         )
         return
@@ -712,7 +1049,7 @@ def _apply_clip_fx(item, effect: dict[str, Any], clip_duration: float, base_posi
                 )
                 for v in vs
             ]
-            item.position.enable_motion().extend(keyframes=times, values=pos_vals)
+            _extend_motion_safe(item, "position", times, pos_vals)
             return
 
         steps = max(8, int(fx_dur * speed * 20.0))
@@ -732,9 +1069,9 @@ def _apply_clip_fx(item, effect: dict[str, Any], clip_duration: float, base_posi
         rot_vals[-1] = base_rotation
         op_vals[-1] = base_opacity
 
-        item.position.enable_motion().extend(keyframes=[float(t) for t in times], values=pos_vals)
-        item.rotation.enable_motion().extend(keyframes=[float(t) for t in times], values=rot_vals)
-        item.opacity.enable_motion().extend(keyframes=[float(t) for t in times], values=op_vals)
+        _extend_motion_safe(item, "position", [float(t) for t in times], pos_vals)
+        _extend_motion_safe(item, "rotation", [float(t) for t in times], rot_vals)
+        _extend_motion_safe(item, "opacity", [float(t) for t in times], op_vals)
         return
 
 
@@ -824,7 +1161,7 @@ def _apply_transition(item, transition: dict[str, Any] | None, clip_duration: fl
             ts, vs = parsed
             kfs = [t0 + (t1 - t0) * t for t in ts]
             vals = [float(base_opacity) * float(v) for v in vs]
-            item.opacity.enable_motion().extend(keyframes=kfs, values=vals)
+            _extend_motion_safe(item, "opacity", kfs, vals)
             return
         kind = "crossfade"
 
@@ -832,23 +1169,23 @@ def _apply_transition(item, transition: dict[str, Any] | None, clip_duration: fl
     if kind in {"fade_black", "crossfade", "wipe_left", "wipe_right", "push_left", "push_right", "slide_left", "slide_right", "slide_up", "slide_down", "zoom_in", "zoom_out"}:
         mid = t0 + (t1 - t0) * (0.5 + softness * 0.15)
         if easing == "linear":
-            item.opacity.enable_motion().extend(keyframes=[t0, t1], values=[op_from, op_to])
+            _extend_motion_safe(item, "opacity", [t0, t1], [op_from, op_to])
         elif easing == "ease_in":
-            item.opacity.enable_motion().extend(keyframes=[t0, mid, t1], values=[op_from, op_from + (op_to - op_from) * 0.35, op_to])
+            _extend_motion_safe(item, "opacity", [t0, mid, t1], [op_from, op_from + (op_to - op_from) * 0.35, op_to])
         elif easing == "ease_out":
-            item.opacity.enable_motion().extend(keyframes=[t0, mid, t1], values=[op_from, op_from + (op_to - op_from) * 0.75, op_to])
+            _extend_motion_safe(item, "opacity", [t0, mid, t1], [op_from, op_from + (op_to - op_from) * 0.75, op_to])
         else:
-            item.opacity.enable_motion().extend(keyframes=[t0, mid, t1], values=[op_from, op_from + (op_to - op_from) * 0.5, op_to])
+            _extend_motion_safe(item, "opacity", [t0, mid, t1], [op_from, op_from + (op_to - op_from) * 0.5, op_to])
 
     if not allow_spatial:
         return
 
     if kind in {"slide_left", "slide_right", "slide_up", "slide_down", "wipe_left", "wipe_right", "push_left", "push_right"}:
         p0, p1 = _transition_motion_values(kind, entering, base_position, base_scale, width, height)
-        item.position.enable_motion().extend(keyframes=[t0, t1], values=[p0, p1], easings=[easing])
+        _extend_motion_safe(item, "position", [t0, t1], [p0, p1], easings=[easing])
     elif kind in {"zoom_in", "zoom_out"}:
         s0, s1 = _transition_motion_values(kind, entering, base_position, base_scale, width, height)
-        item.scale.enable_motion().extend(keyframes=[t0, t1], values=[s0, s1], easings=[easing])
+        _extend_motion_safe(item, "scale", [t0, t1], [s0, s1], easings=[easing])
 
 
 def _smart_bgm_level(timeline: dict[str, Any], default_bgm_db: float = -12.0, duck_db: float = -18.0) -> float:
@@ -903,14 +1240,6 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
         opacity = _safe_float(clip.get("opacity", 1.0), 1.0, min_value=0.0, max_value=1.0)
         motion = clip.get("motion") if isinstance(clip.get("motion"), dict) else {}
         motion_applied_opacity = False
-        render_path = clip["path"]
-        if not bool(clip.get("is_image", False)):
-            clip_shaders = _iter_clip_shaders(clip)
-            if len(clip_shaders) > 0:
-                clip_for_shader = dict(clip)
-                clip_for_shader["path"] = render_path
-                clip_for_shader["clip_shaders"] = clip_shaders
-                render_path = _apply_clip_shaders_to_path(clip_for_shader)
 
         if clip.get("is_image", False):
             prepared_path = _prepare_image_for_canvas(
@@ -932,7 +1261,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                 opacity=opacity,
             )
         else:
-            layer = mv.layer.Video(render_path, audio=bool(clip.get("use_source_audio", True)))
+            layer = mv.layer.Video(clip["path"], audio=bool(clip.get("use_source_audio", True)))
             item = scene.add_layer(
                 layer,
                 offset=start,
@@ -945,6 +1274,30 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                 audio=bool(clip.get("use_source_audio", True)),
                 audio_level=float(clip.get("audio_level_db", 0.0)),
             )
+
+        use_advanced_engine = bool(clip.get("use_layered_fx_engine", False)) or (
+            isinstance(clip.get("advanced_fx_layers"), list) and len(clip.get("advanced_fx_layers")) > 0
+        )
+
+        if use_advanced_engine:
+            _apply_advanced_clip_animation(
+                item,
+                timeline,
+                clip,
+                clip_duration,
+                position,
+                scale,
+                rotation,
+                opacity,
+                width,
+                height,
+                fps,
+                clip_index,
+                total_clips,
+            )
+            pbar.update(1)
+            continue
+
 
         keyframe_times = motion.get("keyframe_times") if isinstance(motion, dict) else None
         if isinstance(keyframe_times, list) and len(keyframe_times) >= 2:
@@ -969,11 +1322,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                     raw_x = _safe_float(px[i], 0.5) if i < len(px) else _safe_float(clip.get("position_x", 0.5), 0.5)
                     raw_y = _safe_float(py[i], 0.5) if i < len(py) else _safe_float(clip.get("position_y", 0.5), 0.5)
                     pos_values.append(_position_to_pixels(raw_x, raw_y, width, height))
-                item.position.enable_motion().clear().extend(
-                    keyframes=motion_times,
-                    values=pos_values,
-                    easings=easings,
-                )
+                _extend_motion_safe(item, "position", motion_times, pos_values, easings=easings, clear=True)
 
             if sx or sy:
                 scale_values = []
@@ -981,31 +1330,19 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                     x = _safe_float(sx[i], scale[0], min_value=0.01, max_value=20.0) if i < len(sx) else scale[0]
                     y = _safe_float(sy[i], scale[1], min_value=0.01, max_value=20.0) if i < len(sy) else scale[1]
                     scale_values.append((x, y))
-                item.scale.enable_motion().clear().extend(
-                    keyframes=motion_times,
-                    values=scale_values,
-                    easings=easings,
-                )
+                _extend_motion_safe(item, "scale", motion_times, scale_values, easings=easings, clear=True)
 
             if rt:
                 rot_values = []
                 for i in range(len(motion_times)):
                     rot_values.append(_safe_float(rt[i], rotation, min_value=-360.0, max_value=360.0) if i < len(rt) else rotation)
-                item.rotation.enable_motion().clear().extend(
-                    keyframes=motion_times,
-                    values=rot_values,
-                    easings=easings,
-                )
+                _extend_motion_safe(item, "rotation", motion_times, rot_values, easings=easings, clear=True)
 
             if op:
                 opacity_values = []
                 for i in range(len(motion_times)):
                     opacity_values.append(_safe_float(op[i], opacity, min_value=0.0, max_value=1.0) if i < len(op) else opacity)
-                item.opacity.enable_motion().clear().extend(
-                    keyframes=motion_times,
-                    values=opacity_values,
-                    easings=easings,
-                )
+                _extend_motion_safe(item, "opacity", motion_times, opacity_values, easings=easings, clear=True)
                 motion_applied_opacity = True
 
         transition_in = _resolve_clip_transition(timeline, clip, clip_index, total_clips, entering=True)
@@ -1025,7 +1362,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                 allow_spatial=not bool(clip.get("is_image", False)),
             )
         elif fade_in > 0 and not motion_applied_opacity:
-            item.opacity.enable_motion().extend(keyframes=[0.0, fade_in], values=[0.0, opacity])
+            _extend_motion_safe(item, "opacity", [0.0, fade_in], [0.0, opacity])
 
         if transition_out is not None:
             _apply_transition(
@@ -1042,7 +1379,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
             )
         elif fade_out > 0 and not motion_applied_opacity:
             t0 = max(0.0, clip_duration - fade_out)
-            item.opacity.enable_motion().extend(keyframes=[t0, clip_duration], values=[opacity, 0.0])
+            _extend_motion_safe(item, "opacity", [t0, clip_duration], [opacity, 0.0])
 
         for fx in _iter_clip_effects(clip):
             _apply_clip_fx(
@@ -2212,6 +2549,111 @@ class MovisApplyFXPreset:
                 existing = []
             existing.extend(fx_list)
             clips[idx]["effects"] = existing
+        return (t,)
+
+
+
+class MovisEnableLayeredFXEngine:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999, "tooltip": "目标视频片段索引，-1 表示最后一段"}),
+                "enabled": ("BOOLEAN", {"default": True, "tooltip": "启用更高级的分层动画引擎；原有节点保留不变"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "set_engine"
+
+    def set_engine(self, timeline, clip_index, enabled):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        clips[idx]["use_layered_fx_engine"] = bool(enabled)
+        return (t,)
+
+
+class MovisAddClipFXLayered:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999, "tooltip": "目标视频片段索引，-1 表示最后一段"}),
+                "effect": (FX_TYPES, {"default": "glitch", "tooltip": "分层特效：可与 motion/transition 同时叠加而不抢 keyframe"}),
+                "start_norm": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
+                "end_norm": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+                "intensity": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 20.0}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+                "replace_existing": ("BOOLEAN", {"default": False}),
+                "custom_curve": ("STRING", {"default": "", "placeholder": "仅 custom 推荐：0:0.5,0.2:1,0.8:0,1:0.5"}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "add_fx_layered"
+
+    def add_fx_layered(self, timeline, clip_index, effect, start_norm, end_norm, intensity, speed, seed, replace_existing, custom_curve):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        fx = _make_fx(effect, start_norm, end_norm, intensity, speed, seed, custom_curve)
+        if fx is None:
+            return (t,)
+        existing = clips[idx].get("advanced_fx_layers")
+        if not isinstance(existing, list) or bool(replace_existing):
+            existing = []
+        existing.append(fx)
+        clips[idx]["advanced_fx_layers"] = existing
+        clips[idx]["use_layered_fx_engine"] = True
+        return (t,)
+
+
+class MovisApplyFXPresetLayered:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": ("MOVIS_TIMELINE",),
+                "clip_index": ("INT", {"default": -1, "min": -99999, "max": 99999, "tooltip": "目标视频片段索引，-1 表示最后一段"}),
+                "preset": (FX_PRESETS, {"default": "cyber_glitch"}),
+                "strength": ("FLOAT", {"default": 0.85, "min": 0.05, "max": 2.0}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+                "replace_existing": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("MOVIS_TIMELINE",)
+    RETURN_NAMES = ("timeline",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "apply_preset_layered"
+
+    def apply_preset_layered(self, timeline, clip_index, preset, strength, seed, replace_existing):
+        t = _clone_timeline(timeline)
+        clips = t.get("video_tracks", [])
+        idx = _resolve_video_clip_index(clips, clip_index)
+        if idx is None:
+            return (t,)
+        fx_list = [x for x in _build_fx_preset(preset, strength, seed) if isinstance(x, dict)]
+        if len(fx_list) == 0:
+            return (t,)
+        existing = clips[idx].get("advanced_fx_layers")
+        if not isinstance(existing, list) or bool(replace_existing):
+            existing = []
+        existing.extend(fx_list)
+        clips[idx]["advanced_fx_layers"] = existing
+        clips[idx]["use_layered_fx_engine"] = True
         return (t,)
 
 
