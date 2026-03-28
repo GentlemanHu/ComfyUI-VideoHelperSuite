@@ -1346,6 +1346,445 @@ if HAS_CUSTOM_FEATURES:
                 "result": (video_result, frames),
             }
 
+    class CaptionStylePreset:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {
+                "required": {
+                    "preset": (
+                        [
+                            "classic_white",
+                            "karaoke_glow",
+                            "minimal_bottom",
+                            "bold_vertical",
+                            "custom_only",
+                        ],
+                        {"default": "classic_white"},
+                    ),
+                    "is_vertical": ("BOOLEAN", {"default": True}),
+                },
+                "optional": {
+                    "custom_override_json": (
+                        "STRING",
+                        {
+                            "default": "",
+                            "multiline": True,
+                            "tooltip": "可选：覆盖预置参数，支持 JSON/Python 字典风格字符串",
+                        },
+                    ),
+                },
+            }
+
+        RETURN_TYPES = ("STRING", "STRING")
+        RETURN_NAMES = ("caption_json_param", "preset_name")
+        CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/caption"
+        FUNCTION = "build_preset"
+
+        @staticmethod
+        def _preset_dict(preset: str, is_vertical: bool):
+            base = {
+                "Fontname": "Roboto-Bold",
+                "Alignment": 5 if is_vertical else 2,
+                "BorderStyle": "1",
+                "Outline": "2",
+                "Shadow": "1",
+                "Blur": "6",
+                "Fontsize": 26 if is_vertical else 20,
+                "MarginL": "0",
+                "MarginR": "0",
+                "word_level": True,
+                "segment_level": True,
+                "vad": True,
+            }
+            if preset == "karaoke_glow":
+                base.update(
+                    {
+                        "Fontname": "Lemon-Regular",
+                        "Blur": "18",
+                        "Outline": "1",
+                        "Shadow": "3",
+                        "highlight_color": "white",
+                        "karaoke": True,
+                    }
+                )
+            elif preset == "minimal_bottom":
+                base.update(
+                    {
+                        "Alignment": 2,
+                        "Blur": "0",
+                        "Outline": "1",
+                        "Shadow": "0",
+                        "Fontsize": 18 if is_vertical else 16,
+                        "word_level": False,
+                    }
+                )
+            elif preset == "bold_vertical":
+                base.update(
+                    {
+                        "Alignment": 5,
+                        "Fontsize": 30,
+                        "Outline": "3",
+                        "Shadow": "2",
+                        "Blur": "4",
+                    }
+                )
+            elif preset == "custom_only":
+                base = {}
+            return base
+
+        def build_preset(self, preset, is_vertical=True, custom_override_json=""):
+            if not HAS_GENTLE_CAPTION:
+                raise RuntimeError("CaptionStylePreset 需要 caption 模块依赖")
+            cp = GentleCaption()
+            style = self._preset_dict(preset, is_vertical)
+            custom_text = str(custom_override_json or "").strip()
+            if custom_text:
+                custom = cp.parse_caption_params(custom_text)
+                if not isinstance(custom, dict):
+                    raise ValueError("custom_override_json 必须是对象字典")
+                style.update(custom)
+            return (json.dumps(style, ensure_ascii=False, indent=2), preset)
+
+    class VideoGentleCaptionsPro:
+        def __init__(self) -> None:
+            self.cp = None
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {
+                "required": {
+                    "video_path": ("STRING", {"default": "", "tooltip": "输入视频路径（支持相对/绝对路径）"}),
+                    "output_filename": ("STRING", {"default": "_captioned_pro", "tooltip": "输出文件名前缀"}),
+                    "is_vertical": ("BOOLEAN", {"default": True, "tooltip": "竖屏/横屏策略"}),
+                    "style_preset": (
+                        [
+                            "classic_white",
+                            "karaoke_glow",
+                            "minimal_bottom",
+                            "bold_vertical",
+                            "custom_only",
+                        ],
+                        {"default": "classic_white"},
+                    ),
+                    "sync_tolerance_ms": ("INT", {"default": 120, "min": 0, "max": 5000, "step": 1}),
+                    "show_progress": ("BOOLEAN", {"default": True}),
+                    "notify_all": ("BOOLEAN", {"default": True, "tooltip": "完成后发送通知"}),
+                },
+                "optional": {
+                    "audio_path": ("STRING", {"default": "", "tooltip": "可选音频路径；为空时使用视频原音轨"}),
+                    "caption_json_param": (
+                        "STRING",
+                        {
+                            "default": "",
+                            "multiline": True,
+                            "tooltip": "可选：基础字幕参数（JSON/Python字典）",
+                        },
+                    ),
+                    "custom_override_json": (
+                        "STRING",
+                        {
+                            "default": "",
+                            "multiline": True,
+                            "tooltip": "可选：覆盖参数（优先级最高）",
+                        },
+                    ),
+                    "notify_message": ("STRING", {"default": "====Caption Pro====", "tooltip": "通知消息内容"}),
+                },
+                "hidden": {},
+            }
+
+        RETURN_TYPES = ("STRING", "INT", "FLOAT", "BOOLEAN", "STRING")
+        RETURN_NAMES = ("Video Path", "frames", "sync_drift_ms", "sync_ok", "applied_caption_json")
+        OUTPUT_NODE = True
+        CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/caption"
+        FUNCTION = "add_gentle_captions_pro"
+
+        def add_gentle_captions_pro(
+            self,
+            video_path,
+            output_filename,
+            is_vertical,
+            style_preset,
+            sync_tolerance_ms,
+            show_progress,
+            notify_all,
+            audio_path="",
+            caption_json_param="",
+            custom_override_json="",
+            notify_message="====Caption Pro====",
+        ):
+            if not HAS_GENTLE_CAPTION:
+                raise RuntimeError("VideoGentleCaptionsPro 需要 caption 模块依赖")
+
+            if self.cp is None:
+                self.cp = GentleCaption()
+
+            pbar = ProgressBar(5) if show_progress else None
+
+            video_path = resolve_media_path(video_path, must_exist=True)
+            if pbar is not None:
+                pbar.update(1)
+
+            resolved_audio_path = resolve_media_path(audio_path, must_exist=True) if str(audio_path or "").strip() else ""
+            output_filename = str(output_filename or "_captioned_pro").strip() or "_captioned_pro"
+
+            params = CaptionStylePreset._preset_dict(style_preset, is_vertical)
+            if str(caption_json_param or "").strip():
+                params.update(self.cp.parse_caption_params(caption_json_param))
+            if str(custom_override_json or "").strip():
+                params.update(self.cp.parse_caption_params(custom_override_json))
+            if pbar is not None:
+                pbar.update(1)
+
+            real_filename, video_result, frames = self.cp.make_video(
+                bg_video_path=video_path,
+                bg_audio_path=resolved_audio_path,
+                output_filename=output_filename,
+                extra_para=params,
+                is_vertical=is_vertical,
+            )
+            if pbar is not None:
+                pbar.update(2)
+
+            output_video_info = self.cp.get_media_info(video_result, kind="video")
+            ref_audio_path = resolved_audio_path if resolved_audio_path else video_path
+            ref_audio_info = self.cp.get_media_info(ref_audio_path, kind="audio")
+            drift_ms = abs(float(output_video_info["duration"]) - float(ref_audio_info["duration"])) * 1000.0
+            sync_ok = drift_ms <= float(sync_tolerance_ms)
+            if pbar is not None:
+                pbar.update(1)
+
+            if notify_all:
+                notifyAll(video_result, f"{notify_message} | sync_ok={sync_ok} | drift_ms={drift_ms:.2f}")
+
+            previews = [
+                {
+                    "filename": real_filename,
+                    "subfolder": "",
+                    "type": "output",
+                    "format": "video/h264-mp4",
+                }
+            ]
+            applied_json = json.dumps(params, ensure_ascii=False, indent=2)
+            return {
+                "ui": {
+                    "gifs": previews,
+                    "video": [{"filename": real_filename, "subfolder": "", "type": "output"}],
+                    "frames": [frames],
+                    "sync_drift_ms": [drift_ms],
+                    "sync_ok": [sync_ok],
+                },
+                "result": (video_result, frames, drift_ms, sync_ok, applied_json),
+            }
+
+    def _srt_ts_to_sec(raw):
+        x = str(raw).strip().replace(".", ",")
+        hh, mm, ss_ms = x.split(":")
+        ss, ms = ss_ms.split(",")
+        return int(hh) * 3600 + int(mm) * 60 + int(ss) + int(ms[:3].ljust(3, "0")) / 1000.0
+
+    class MovisSubtitleFromSRT:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {
+                "required": {
+                    "timeline": ("MOVIS_TIMELINE",),
+                    "srt_path": ("STRING", {"default": "", "tooltip": "SRT 文件路径"}),
+                    "font_size": ("FLOAT", {"default": 54.0, "min": 8.0, "max": 300.0}),
+                    "font_family": ("STRING", {"default": "Sans Serif"}),
+                    "color": ("STRING", {"default": "white"}),
+                    "position_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                    "position_y": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0}),
+                    "opacity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+                    "start_offset": ("FLOAT", {"default": 0.0, "min": -86400.0, "max": 86400.0}),
+                    "replace_existing": ("BOOLEAN", {"default": False}),
+                }
+            }
+
+        RETURN_TYPES = ("MOVIS_TIMELINE", "INT")
+        RETURN_NAMES = ("timeline", "subtitle_count")
+        CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+        FUNCTION = "add_srt"
+
+        def add_srt(self, timeline, srt_path, font_size, font_family, color, position_x, position_y, opacity, start_offset, replace_existing):
+            t = json.loads(json.dumps(timeline))
+            real_srt = resolve_media_path(srt_path, must_exist=True)
+
+            content = None
+            for enc in ("utf-8-sig", "utf-8", "gbk"):
+                try:
+                    with open(real_srt, "r", encoding=enc) as f:
+                        content = f.read()
+                    break
+                except Exception:
+                    continue
+            if content is None:
+                raise RuntimeError("无法读取 SRT 文件编码")
+
+            if replace_existing:
+                t["text_tracks"] = []
+            elif "text_tracks" not in t or not isinstance(t.get("text_tracks"), list):
+                t["text_tracks"] = []
+
+            block_re = re.compile(
+                r"(?ms)^\\s*\\d+\\s*\\n\\s*(\\d{2}:\\d{2}:\\d{2}[,.]\\d{1,3})\\s*-->\\s*(\\d{2}:\\d{2}:\\d{2}[,.]\\d{1,3}).*?\\n(.*?)(?=\\n\\s*\\n|\\Z)"
+            )
+            count = 0
+            for m in block_re.finditer(content):
+                st = _srt_ts_to_sec(m.group(1)) + float(start_offset)
+                et = _srt_ts_to_sec(m.group(2)) + float(start_offset)
+                txt = re.sub(r"\r?\n", " ", m.group(3)).strip()
+                if not txt:
+                    continue
+                dur = max(0.01, et - st)
+                t["text_tracks"].append(
+                    {
+                        "text": txt,
+                        "start": max(0.0, st),
+                        "duration": dur,
+                        "font_size": float(font_size),
+                        "font_family": str(font_family),
+                        "color": str(color),
+                        "position_x": float(position_x),
+                        "position_y": float(position_y),
+                        "opacity": float(opacity),
+                    }
+                )
+                count += 1
+            return (t, count)
+
+    class MovisAutoCaptionTimeline:
+        def __init__(self) -> None:
+            self.cp = None
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {
+                "required": {
+                    "timeline": ("MOVIS_TIMELINE",),
+                    "video_path": ("STRING", {"default": "", "tooltip": "视频路径（用于参考时长；可不与时间线视频一致）"}),
+                    "audio_path": ("STRING", {"default": "", "tooltip": "可选；为空时使用视频音轨"}),
+                    "style_preset": (
+                        ["classic_white", "karaoke_glow", "minimal_bottom", "bold_vertical", "custom_only"],
+                        {"default": "classic_white"},
+                    ),
+                    "position_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                    "position_y": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0}),
+                    "start_offset": ("FLOAT", {"default": 0.0, "min": -86400.0, "max": 86400.0}),
+                    "sync_tolerance_ms": ("INT", {"default": 120, "min": 0, "max": 5000}),
+                    "replace_existing": ("BOOLEAN", {"default": False}),
+                    "show_progress": ("BOOLEAN", {"default": True}),
+                },
+                "optional": {
+                    "caption_json_param": ("STRING", {"default": "", "multiline": True}),
+                    "custom_override_json": ("STRING", {"default": "", "multiline": True}),
+                },
+            }
+
+        RETURN_TYPES = ("MOVIS_TIMELINE", "INT", "FLOAT", "BOOLEAN", "STRING")
+        RETURN_NAMES = ("timeline", "subtitle_count", "sync_drift_ms", "sync_ok", "applied_caption_json")
+        CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+        FUNCTION = "auto_caption"
+
+        def _extract_segments(self, transcribe_obj):
+            segs = getattr(transcribe_obj, "segments", None)
+            if isinstance(segs, list):
+                return segs
+            if isinstance(transcribe_obj, dict) and isinstance(transcribe_obj.get("segments"), list):
+                return transcribe_obj.get("segments")
+            return []
+
+        def auto_caption(
+            self,
+            timeline,
+            video_path,
+            audio_path,
+            style_preset,
+            position_x,
+            position_y,
+            start_offset,
+            sync_tolerance_ms,
+            replace_existing,
+            show_progress,
+            caption_json_param="",
+            custom_override_json="",
+        ):
+            if not HAS_GENTLE_CAPTION:
+                raise RuntimeError("MovisAutoCaptionTimeline 需要 caption 模块依赖")
+
+            if self.cp is None:
+                self.cp = GentleCaption()
+            pbar = ProgressBar(5) if show_progress else None
+
+            t = json.loads(json.dumps(timeline))
+            vpath = resolve_media_path(video_path, must_exist=True)
+            apath = resolve_media_path(audio_path, must_exist=True) if str(audio_path or "").strip() else vpath
+            if pbar is not None:
+                pbar.update(1)
+
+            style = CaptionStylePreset._preset_dict(style_preset, True)
+            if str(caption_json_param or "").strip():
+                style.update(self.cp.parse_caption_params(caption_json_param))
+            if str(custom_override_json or "").strip():
+                style.update(self.cp.parse_caption_params(custom_override_json))
+            if pbar is not None:
+                pbar.update(1)
+
+            self.cp._ensure_model()
+            transcribe = self.cp.model.transcribe(apath, regroup=True, fp16=torch.cuda.is_available())
+            segs = self._extract_segments(transcribe)
+            if replace_existing:
+                t["text_tracks"] = []
+            elif "text_tracks" not in t or not isinstance(t.get("text_tracks"), list):
+                t["text_tracks"] = []
+            if pbar is not None:
+                pbar.update(1)
+
+            default_font_size = float(style.get("Fontsize", 54))
+            default_font_family = str(style.get("Fontname", "Sans Serif"))
+            default_color = str(style.get("highlight_color", "white"))
+            default_opacity = 1.0
+
+            count = 0
+            for seg in segs:
+                if isinstance(seg, dict):
+                    st = float(seg.get("start", 0.0))
+                    et = float(seg.get("end", st + 0.01))
+                    txt = str(seg.get("text", "")).strip()
+                else:
+                    st = float(getattr(seg, "start", 0.0))
+                    et = float(getattr(seg, "end", st + 0.01))
+                    txt = str(getattr(seg, "text", "")).strip()
+                if not txt:
+                    continue
+                st += float(start_offset)
+                et += float(start_offset)
+                t["text_tracks"].append(
+                    {
+                        "text": txt,
+                        "start": max(0.0, st),
+                        "duration": max(0.01, et - st),
+                        "font_size": default_font_size,
+                        "font_family": default_font_family,
+                        "color": default_color,
+                        "position_x": float(position_x),
+                        "position_y": float(position_y),
+                        "opacity": default_opacity,
+                    }
+                )
+                count += 1
+            if pbar is not None:
+                pbar.update(1)
+
+            vinfo = self.cp.get_media_info(vpath, kind="video")
+            ainfo = self.cp.get_media_info(apath, kind="audio")
+            drift_ms = abs(float(vinfo["duration"]) - float(ainfo["duration"])) * 1000.0
+            sync_ok = drift_ms <= float(sync_tolerance_ms)
+            if pbar is not None:
+                pbar.update(1)
+
+            return (t, count, drift_ms, sync_ok, json.dumps(style, ensure_ascii=False, indent=2))
+
 # Node mappings
 NODE_CLASS_MAPPINGS = {
     # Original nodes
@@ -1450,6 +1889,18 @@ if HAS_CUSTOM_FEATURES:
     if 'VideoGentleCaptions' in globals():
         NODE_CLASS_MAPPINGS.update({"VHS_VideoGentleCaptions": VideoGentleCaptions})
         NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_VideoGentleCaptions": "Video Gentle Captions 🎥🅥🅗🅢"})
+    if 'CaptionStylePreset' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_CaptionStylePreset": CaptionStylePreset})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_CaptionStylePreset": "Caption Style Preset 🎨🎥🅥🅗🅢"})
+    if 'VideoGentleCaptionsPro' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_VideoGentleCaptionsPro": VideoGentleCaptionsPro})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_VideoGentleCaptionsPro": "Video Gentle Captions Pro 🧠🎥🅥🅗🅢"})
+    if 'MovisSubtitleFromSRT' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_MOVIS_SubtitleFromSRT": MovisSubtitleFromSRT})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_MOVIS_SubtitleFromSRT": "Movis Subtitle From SRT 🎬📝🎥🅥🅗🅢"})
+    if 'MovisAutoCaptionTimeline' in globals():
+        NODE_CLASS_MAPPINGS.update({"VHS_MOVIS_AutoCaptionTimeline": MovisAutoCaptionTimeline})
+        NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_MOVIS_AutoCaptionTimeline": "Movis Auto Caption Timeline 🎬🤖📝🎥🅥🅗🅢"})
     
     # Try to add video_ops nodes if available
     try:

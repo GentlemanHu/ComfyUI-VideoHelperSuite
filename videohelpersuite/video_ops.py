@@ -1941,6 +1941,7 @@ class MovisAddAudioTrack:
             "required": {
                 "timeline": ("MOVIS_TIMELINE",),
                 "audio_path": ("STRING", {"default": "", "placeholder": "可留空，改接 AUDIO"}),
+                "placement_mode": (["match_last_video", "append", "absolute"], {"default": "match_last_video", "tooltip": "match_last_video: 对齐最近视频片段起点；append: 追加到时间线末尾；absolute: 使用 start 绝对时间"}),
                 "start": ("FLOAT", {"default": 0.0, "min": 0.0}),
                 "duration": ("FLOAT", {"default": 0.0, "min": 0.0}),
                 "source_start": ("FLOAT", {"default": 0.0, "min": 0.0}),
@@ -1956,16 +1957,37 @@ class MovisAddAudioTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_audio"
 
-    def add_audio(self, timeline, audio_path, start, duration, source_start, audio_level_db, audio=None):
+    def add_audio(self, timeline, audio_path, placement_mode, start, duration, source_start, audio_level_db, audio=None):
         t = _clone_timeline(timeline)
         path = _resolve_audio_input(audio_path, audio=audio, prefix="movis_audio_track")
         clip_duration = _safe_float(duration, 0.0, min_value=0.0)
         if clip_duration <= 0:
             clip_duration = _audio_duration(path)
+
+        mode = str(placement_mode or "match_last_video").strip().lower()
+        start_value = _safe_float(start, 0.0, min_value=0.0)
+        if mode == "append":
+            resolved_start = _timeline_content_duration(t) + start_value
+        elif mode == "match_last_video":
+            videos = t.get("video_tracks", [])
+            if isinstance(videos, list) and len(videos) > 0:
+                audios = t.get("audio_tracks", [])
+                # 优先按“第N条音轨对应第N个视频片段”对齐，便于一段视频配一段音频。
+                # 若音轨数量已超过视频数量，则回退到最后一个视频片段。
+                if isinstance(audios, list) and len(audios) < len(videos):
+                    target_video = videos[len(audios)]
+                else:
+                    target_video = videos[-1]
+                resolved_start = _safe_float(target_video.get("start", 0.0), 0.0, min_value=0.0) + start_value
+            else:
+                resolved_start = start_value
+        else:
+            resolved_start = start_value
+
         t["audio_tracks"].append(
             {
                 "path": path,
-                "start": _safe_float(start, 0.0, min_value=0.0),
+                "start": resolved_start,
                 "duration": max(0.01, clip_duration),
                 "source_start": _safe_float(source_start, 0.0, min_value=0.0),
                 "audio_level_db": _safe_float(audio_level_db, 0.0, min_value=-60.0, max_value=24.0),
@@ -1980,7 +2002,7 @@ class MovisSetBGM:
         return {
             "required": {
                 "timeline": ("MOVIS_TIMELINE",),
-                "bgm_path": ("STRING", {"default": "", "placeholder": "可留空，改接 AUDIO"}),
+                "bgm_path": ("STRING", {"default": "", "placeholder": "可留空，改接 AUDIO", "tooltip": "全局BGM，仅保留一条，会覆盖此前设置"}),
                 "audio_level_db": ("FLOAT", {"default": -12.0, "min": -60.0, "max": 24.0}),
                 "source_start": ("FLOAT", {"default": 0.0, "min": 0.0}),
             },
