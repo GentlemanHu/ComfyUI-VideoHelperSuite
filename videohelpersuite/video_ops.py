@@ -1,9 +1,55 @@
 import copy
 import datetime
+import os
+import sys
 import subprocess
 import wave
 from pathlib import Path
 from typing import Any
+
+
+def _is_truthy_env(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_linux_headless() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    if _is_truthy_env("COMFYUI_FORCE_HEADLESS_QT"):
+        return True
+    has_display = any(
+        bool(str(os.environ.get(k, "")).strip()) for k in ("DISPLAY", "WAYLAND_DISPLAY", "MIR_SOCKET")
+    )
+    return not has_display
+
+
+def _configure_qt_runtime_for_headless() -> None:
+    """
+    在 Linux 无头环境下，为 Qt 相关库设置更稳健的默认运行参数。
+
+    目的：
+    1) 避免默认 xcb 平台插件在无 DISPLAY 环境初始化失败；
+    2) 避免被 OpenCV 自带 Qt 插件路径污染（常见于 cv2/qt/plugins）；
+    3) 不影响有头环境：仅在无头 Linux 或显式强制时生效。
+    """
+    if not _is_linux_headless():
+        return
+
+    if not _is_truthy_env("COMFYUI_KEEP_QT_PLATFORM"):
+        current_platform = str(os.environ.get("QT_QPA_PLATFORM", "")).strip().lower()
+        if current_platform in {"", "xcb"}:
+            os.environ["QT_QPA_PLATFORM"] = str(
+                os.environ.get("COMFYUI_HEADLESS_QT_PLATFORM", "offscreen")
+            ).strip() or "offscreen"
+
+    plugin_path = str(os.environ.get("QT_QPA_PLATFORM_PLUGIN_PATH", ""))
+    if "cv2/qt/plugins" in plugin_path.replace("\\", "/").lower():
+        os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+
+    os.environ.setdefault("QT_OPENGL", "software")
+
+
+_configure_qt_runtime_for_headless()
 
 import movis as mv
 import numpy as np
