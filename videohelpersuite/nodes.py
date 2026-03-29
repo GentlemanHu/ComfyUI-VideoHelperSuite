@@ -1657,6 +1657,172 @@ if HAS_CUSTOM_FEATURES:
         def __init__(self) -> None:
             self.cp = None
 
+        def _resolve_if_valid(self, raw_path: str):
+            p = str(raw_path or "").strip()
+            if not p:
+                return None
+            try:
+                return resolve_media_path(p, must_exist=True)
+            except Exception as e:
+                logger.warn(f"[MovisAutoCaptionTimeline] 路径不可用，已忽略: {p} | {e}")
+                return None
+
+        def _infer_video_path_from_timeline(self, timeline):
+            tracks = timeline.get("video_tracks", []) if isinstance(timeline, dict) else []
+            if not isinstance(tracks, list):
+                return None
+            for clip in tracks:
+                if not isinstance(clip, dict):
+                    continue
+                path = self._resolve_if_valid(clip.get("path", ""))
+                if path:
+                    return path
+            return None
+
+        def _infer_audio_path_from_timeline(self, timeline):
+            if not isinstance(timeline, dict):
+                return None
+
+            audio_tracks = timeline.get("audio_tracks", [])
+            if isinstance(audio_tracks, list):
+                for track in audio_tracks:
+                    if not isinstance(track, dict):
+                        continue
+                    path = self._resolve_if_valid(track.get("path", ""))
+                    if path:
+                        return path
+
+            bgm = timeline.get("bgm", {})
+            if isinstance(bgm, dict):
+                path = self._resolve_if_valid(bgm.get("path", ""))
+                if path:
+                    return path
+
+            return None
+
+        def _extract_video_clips(self, timeline):
+            clips = []
+            tracks = timeline.get("video_tracks", []) if isinstance(timeline, dict) else []
+            if not isinstance(tracks, list):
+                return clips
+            for idx, clip in enumerate(tracks):
+                if not isinstance(clip, dict):
+                    continue
+                path = self._resolve_if_valid(clip.get("path", ""))
+                start = float(clip.get("start", 0.0) or 0.0)
+                duration = float(clip.get("duration", 0.0) or 0.0)
+                source_start = float(clip.get("source_start", 0.0) or 0.0)
+                if duration <= 0:
+                    continue
+                clips.append({
+                    "idx": idx,
+                    "path": path,
+                    "start": start,
+                    "duration": duration,
+                    "end": start + duration,
+                    "source_start": source_start,
+                    "use_source_audio": bool(clip.get("use_source_audio", True)),
+                })
+            clips.sort(key=lambda x: (x["start"], x["idx"]))
+            return clips
+
+        def _extract_audio_tracks(self, timeline):
+            tracks_out = []
+            tracks = timeline.get("audio_tracks", []) if isinstance(timeline, dict) else []
+            if not isinstance(tracks, list):
+                return tracks_out
+            for idx, track in enumerate(tracks):
+                if not isinstance(track, dict):
+                    continue
+                path = self._resolve_if_valid(track.get("path", ""))
+                duration = float(track.get("duration", 0.0) or 0.0)
+                start = float(track.get("start", 0.0) or 0.0)
+                source_start = float(track.get("source_start", 0.0) or 0.0)
+                if duration <= 0 or not path:
+                    continue
+                tracks_out.append({
+                    "idx": idx,
+                    "path": path,
+                    "start": start,
+                    "duration": duration,
+                    "end": start + duration,
+                    "source_start": source_start,
+                })
+            tracks_out.sort(key=lambda x: (x["start"], x["idx"]))
+            return tracks_out
+
+        def _overlap(self, a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+            return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+        def _pick_audio_for_clip(self, clip, audio_tracks, used_audio_idx):
+            if not audio_tracks:
+                return None
+            c_start, c_end = float(clip["start"]), float(clip["end"])
+            c_dur = max(0.01, c_end - c_start)
+
+            best = None
+            best_key = None
+            for t in audio_tracks:
+                ov = self._overlap(c_start, c_end, float(t["start"]), float(t["end"]))
+                start_diff = abs(float(t["start"]) - c_start)
+                used_penalty = 100000.0 if t["idx"] in used_audio_idx else 0.0
+                key = (
+                    -ov,
+                    start_diff + used_penalty,
+                    abs(float(t["duration"]) - c_dur),
+                    t["idx"],
+                )
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best = t
+
+            if best is None:
+                return None
+
+            ov = self._overlap(c_start, c_end, float(best["start"]), float(best["end"]))
+            max_start_diff = max(2.0, c_dur * 0.25)
+            if ov <= 0 and abs(float(best["start"]) - c_start) > max_start_diff:
+                return None
+            return best
+
+        def _append_segment_text(self, t, seg, source_start, timeline_start, timeline_end, start_offset, position_x, position_y, default_font_size, default_font_family, default_color, default_opacity):
+            if isinstance(seg, dict):
+                st = float(seg.get("start", 0.0))
+                et = float(seg.get("end", st + 0.01))
+                txt = str(seg.get("text", "")).strip()
+            else:
+                st = float(getattr(seg, "start", 0.0))
+                et = float(getattr(seg, "end", st + 0.01))
+                txt = str(getattr(seg, "text", "")).strip()
+            if not txt:
+                return 0
+
+            out_st = float(timeline_start) + (st - float(source_start)) + float(start_offset)
+            out_et = float(timeline_start) + (et - float(source_start)) + float(start_offset)
+
+            if out_et <= float(timeline_start) or out_st >= float(timeline_end):
+                return 0
+
+            out_st = max(float(timeline_start), out_st)
+            out_et = min(float(timeline_end), out_et)
+            if out_et - out_st < 0.01:
+                return 0
+
+            t["text_tracks"].append(
+                {
+                    "text": txt,
+                    "start": max(0.0, out_st),
+                    "duration": max(0.01, out_et - out_st),
+                    "font_size": float(default_font_size),
+                    "font_family": str(default_font_family),
+                    "color": str(default_color),
+                    "position_x": float(position_x),
+                    "position_y": float(position_y),
+                    "opacity": float(default_opacity),
+                }
+            )
+            return 1
+
         @classmethod
         def INPUT_TYPES(cls):
             return {
@@ -1694,6 +1860,23 @@ if HAS_CUSTOM_FEATURES:
                 return transcribe_obj.get("segments")
             return []
 
+        def _transcribe_cached(self, path, cache):
+            if not path:
+                return []
+            if path in cache:
+                return cache[path]
+            try:
+                self.cp._ensure_model()
+                transcribe = self.cp.model.transcribe(path, regroup=True, fp16=torch.cuda.is_available())
+                segs = self._extract_segments(transcribe)
+                cache[path] = segs
+                logger.info(f"[MovisAutoCaptionTimeline] 识别完成: {path} | segments={len(segs)}")
+                return segs
+            except Exception as e:
+                logger.warn(f"[MovisAutoCaptionTimeline] 识别失败，已跳过: {path} | {e}")
+                cache[path] = []
+                return []
+
         def auto_caption(
             self,
             timeline,
@@ -1717,8 +1900,31 @@ if HAS_CUSTOM_FEATURES:
             pbar = ProgressBar(5) if show_progress else None
 
             t = json.loads(json.dumps(timeline))
-            vpath = resolve_media_path(video_path, must_exist=True)
-            apath = resolve_media_path(audio_path, must_exist=True) if str(audio_path or "").strip() else vpath
+            explicit_video = self._resolve_if_valid(video_path)
+            explicit_audio = self._resolve_if_valid(audio_path)
+            inferred_video = self._infer_video_path_from_timeline(t)
+            inferred_audio = self._infer_audio_path_from_timeline(t)
+            video_clips = self._extract_video_clips(t)
+            audio_tracks = self._extract_audio_tracks(t)
+
+            vpath = explicit_video or inferred_video
+            apath = explicit_audio or inferred_audio or vpath
+
+            if explicit_video:
+                logger.info(f"[MovisAutoCaptionTimeline] 使用显式 video_path: {explicit_video}")
+            elif inferred_video:
+                logger.info(f"[MovisAutoCaptionTimeline] video_path 为空，已从 timeline.video_tracks 自动推断: {inferred_video}")
+            else:
+                logger.warn("[MovisAutoCaptionTimeline] video_path 为空，且 timeline 中无可用视频路径；将跳过时长对齐检测")
+
+            if explicit_audio:
+                logger.info(f"[MovisAutoCaptionTimeline] 使用显式 audio_path: {explicit_audio}")
+            elif inferred_audio:
+                logger.info(f"[MovisAutoCaptionTimeline] audio_path 为空，已从 timeline.audio_tracks/bgm 自动推断: {inferred_audio}")
+            elif vpath:
+                logger.info("[MovisAutoCaptionTimeline] audio_path 为空，且 timeline 无独立音频，回退使用视频音轨")
+            else:
+                logger.warn("[MovisAutoCaptionTimeline] 无可用音频来源（audio_path/video_path/timeline 均缺失）；将跳过自动字幕，不阻断流程")
             if pbar is not None:
                 pbar.update(1)
 
@@ -1730,13 +1936,12 @@ if HAS_CUSTOM_FEATURES:
             if pbar is not None:
                 pbar.update(1)
 
-            self.cp._ensure_model()
-            transcribe = self.cp.model.transcribe(apath, regroup=True, fp16=torch.cuda.is_available())
-            segs = self._extract_segments(transcribe)
             if replace_existing:
                 t["text_tracks"] = []
             elif "text_tracks" not in t or not isinstance(t.get("text_tracks"), list):
                 t["text_tracks"] = []
+
+            transcribe_cache = {}
             if pbar is not None:
                 pbar.update(1)
 
@@ -1746,40 +1951,102 @@ if HAS_CUSTOM_FEATURES:
             default_opacity = 1.0
 
             count = 0
-            for seg in segs:
-                if isinstance(seg, dict):
-                    st = float(seg.get("start", 0.0))
-                    et = float(seg.get("end", st + 0.01))
-                    txt = str(seg.get("text", "")).strip()
-                else:
-                    st = float(getattr(seg, "start", 0.0))
-                    et = float(getattr(seg, "end", st + 0.01))
-                    txt = str(getattr(seg, "text", "")).strip()
-                if not txt:
-                    continue
-                st += float(start_offset)
-                et += float(start_offset)
-                t["text_tracks"].append(
-                    {
-                        "text": txt,
-                        "start": max(0.0, st),
-                        "duration": max(0.01, et - st),
-                        "font_size": default_font_size,
-                        "font_family": default_font_family,
-                        "color": default_color,
-                        "position_x": float(position_x),
-                        "position_y": float(position_y),
-                        "opacity": default_opacity,
-                    }
-                )
-                count += 1
+            used_audio_idx = set()
+            if explicit_audio:
+                segs = self._transcribe_cached(explicit_audio, transcribe_cache)
+                for seg in segs:
+                    count += self._append_segment_text(
+                        t, seg,
+                        source_start=0.0,
+                        timeline_start=0.0,
+                        timeline_end=10**9,
+                        start_offset=start_offset,
+                        position_x=position_x,
+                        position_y=position_y,
+                        default_font_size=default_font_size,
+                        default_font_family=default_font_family,
+                        default_color=default_color,
+                        default_opacity=default_opacity,
+                    )
+                logger.info(f"[MovisAutoCaptionTimeline] 模式=显式全局音频，字幕条数={count}")
+            elif len(video_clips) > 0:
+                logger.info(f"[MovisAutoCaptionTimeline] 模式=智能多轨匹配，video_clips={len(video_clips)}, audio_tracks={len(audio_tracks)}")
+                for clip in video_clips:
+                    chosen_audio = self._pick_audio_for_clip(clip, audio_tracks, used_audio_idx)
+                    segs = []
+                    source_start = 0.0
+                    source_desc = ""
+
+                    if chosen_audio is not None:
+                        used_audio_idx.add(chosen_audio["idx"])
+                        segs = self._transcribe_cached(chosen_audio["path"], transcribe_cache)
+                        source_start = float(chosen_audio.get("source_start", 0.0))
+                        source_desc = f"audio_track#{chosen_audio['idx']}"
+                    elif clip.get("use_source_audio", True) and clip.get("path"):
+                        segs = self._transcribe_cached(clip.get("path"), transcribe_cache)
+                        source_start = float(clip.get("source_start", 0.0))
+                        source_desc = f"video_source#{clip['idx']}"
+                    else:
+                        logger.warn(f"[MovisAutoCaptionTimeline] clip#{clip['idx']} 无匹配音频且禁用源音轨，跳过")
+                        continue
+
+                    clip_added = 0
+                    for seg in segs:
+                        clip_added += self._append_segment_text(
+                            t, seg,
+                            source_start=source_start,
+                            timeline_start=float(clip["start"]),
+                            timeline_end=float(clip["end"]),
+                            start_offset=start_offset,
+                            position_x=position_x,
+                            position_y=position_y,
+                            default_font_size=default_font_size,
+                            default_font_family=default_font_family,
+                            default_color=default_color,
+                            default_opacity=default_opacity,
+                        )
+                    count += clip_added
+                    logger.info(
+                        f"[MovisAutoCaptionTimeline] clip#{clip['idx']} matched={source_desc or 'none'} "
+                        f"window=({clip['start']:.3f},{clip['end']:.3f}) added={clip_added}"
+                    )
+            elif apath:
+                segs = self._transcribe_cached(apath, transcribe_cache)
+                for seg in segs:
+                    count += self._append_segment_text(
+                        t, seg,
+                        source_start=0.0,
+                        timeline_start=0.0,
+                        timeline_end=10**9,
+                        start_offset=start_offset,
+                        position_x=position_x,
+                        position_y=position_y,
+                        default_font_size=default_font_size,
+                        default_font_family=default_font_family,
+                        default_color=default_color,
+                        default_opacity=default_opacity,
+                    )
+                logger.info(f"[MovisAutoCaptionTimeline] 模式=回退单源识别，字幕条数={count}")
+            else:
+                logger.warn("[MovisAutoCaptionTimeline] 缺少可识别音频来源，未生成字幕")
             if pbar is not None:
                 pbar.update(1)
 
-            vinfo = self.cp.get_media_info(vpath, kind="video")
-            ainfo = self.cp.get_media_info(apath, kind="audio")
-            drift_ms = abs(float(vinfo["duration"]) - float(ainfo["duration"])) * 1000.0
-            sync_ok = drift_ms <= float(sync_tolerance_ms)
+            drift_ms = -1.0
+            sync_ok = False
+            if vpath and apath:
+                try:
+                    vinfo = self.cp.get_media_info(vpath, kind="video")
+                    ainfo = self.cp.get_media_info(apath, kind="audio")
+                    drift_ms = abs(float(vinfo["duration"]) - float(ainfo["duration"])) * 1000.0
+                    sync_ok = drift_ms <= float(sync_tolerance_ms)
+                except Exception as e:
+                    logger.warn(f"[MovisAutoCaptionTimeline] 同步检测失败，已跳过: {e}")
+            else:
+                logger.warn("[MovisAutoCaptionTimeline] 缺少视频或音频参考，未执行同步检测（sync_drift_ms=-1）")
+
+            if count == 0:
+                logger.warn("[MovisAutoCaptionTimeline] 本次未生成任何字幕（可能无有效音频/识别失败/语音为空）")
             if pbar is not None:
                 pbar.update(1)
 
