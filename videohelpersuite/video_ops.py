@@ -1,6 +1,7 @@
 import copy
 import datetime
 import os
+import re
 import sys
 import subprocess
 import wave
@@ -471,7 +472,7 @@ FX_PRESETS = [
 ]
 
 GPU_SHADER_CODECS = ["libx264", "h264_nvenc", "hevc_nvenc"]
-GPU_SHADER_BACKENDS = ["libplacebo_vulkan"]
+GPU_SHADER_BACKENDS = ["libplacebo_vulkan", "libplacebo_auto"]
 
 
 def _get_motion_object(item, prop: str):
@@ -886,53 +887,374 @@ def _resolve_shader_file(shader_path: str, shader_code: str, prefix: str = "movi
     return resolve_media_path(path, must_exist=True)
 
 
-def _apply_gpu_shader_ffmpeg(input_video_path: str, shader_file_path: str, output_file_prefix: str, backend: str, codec: str, keep_audio: bool) -> str:
+def _check_vulkan_available() -> bool:
+    """Check if Vulkan is usable on this system for ffmpeg libplacebo."""
+    if sys.platform == "win32":
+        return True
+    try:
+        res = subprocess.run(
+            ["vulkaninfo", "--summary"],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = (res.stdout + res.stderr).lower()
+        if "devicename" in out and "llvmpipe" not in out:
+            return True
+        return False
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# mpv/libplacebo shader → standard GLSL 330 converter
+# ---------------------------------------------------------------------------
+
+def _parse_mpv_shader_to_fragment(shader_text: str) -> str:
+    """
+    Best-effort conversion of an mpv / libplacebo HOOK shader to a
+    standard GLSL 330 core fragment shader that can be run via moderngl.
+
+    If the file is already standard GLSL (contains ``void main``), it is
+    returned as-is.
+    """
+    # Already standard GLSL?
+    if "//!HOOK" not in shader_text and "//!BIND" not in shader_text:
+        return shader_text
+
+    # Strip mpv directives, keep the rest
+    body_lines: list[str] = []
+    for line in shader_text.split("\n"):
+        if line.strip().startswith("//!"):
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines)
+
+    # Replace mpv builtins with standard GLSL equivalents
+    body = body.replace("HOOKED_tex(HOOKED_pos)", "texture(u_tex, v_uv)")
+    body = body.replace("HOOKED_pos", "v_uv")
+    body = body.replace("HOOKED_size", "u_tex_size")
+    body = body.replace("HOOKED_pt", "u_tex_pt")
+    # HOOKED_texOff(0) and similar zero-offset forms
+    body = re.sub(
+        r"HOOKED_texOff\(\s*(?:0|vec2\s*\(\s*0(?:\.0)?\s*(?:,\s*0(?:\.0)?\s*)?\))\s*\)",
+        "texture(u_tex, v_uv)",
+        body,
+    )
+    # General HOOKED_texOff(expr) → texture(u_tex, v_uv + (expr) * u_tex_pt)
+    body = re.sub(
+        r"HOOKED_texOff\(([^)]+)\)",
+        r"texture(u_tex, v_uv + (\1) * u_tex_pt)",
+        body,
+    )
+    # HOOKED_tex(expr) → texture(u_tex, expr)
+    body = re.sub(
+        r"HOOKED_tex\(([^)]+)\)",
+        r"texture(u_tex, \1)",
+        body,
+    )
+
+    has_hook_fn = bool(re.search(r"vec4\s+hook\s*\(", body))
+
+    header = (
+        "#version 330 core\n"
+        "precision mediump float;\n"
+        "uniform sampler2D u_tex;\n"
+        "uniform vec2 u_tex_size;\n"
+        "uniform vec2 u_tex_pt;\n"
+        "in vec2 v_uv;\n"
+        "out vec4 fragColor;\n\n"
+    )
+
+    if has_hook_fn:
+        return header + body + "\nvoid main() { fragColor = hook(); }\n"
+    else:
+        # Assume an already-complete main or inline code
+        return header + body + "\n"
+
+
+# ---------------------------------------------------------------------------
+# OpenGL (moderngl / EGL) frame-by-frame shader renderer
+# ---------------------------------------------------------------------------
+
+def _apply_shader_opengl(
+    input_video_path: str,
+    shader_file_path: str,
+    output_path: str,
+    codec: str,
+    keep_audio: bool,
+) -> str:
+    """
+    Process every frame of *input_video_path* through a GLSL shader using
+    **moderngl** with an EGL (headless) or native OpenGL context – the same
+    mechanism DepthFlow / ShaderFlow uses.
+
+    Falls back gracefully if moderngl is not installed.
+    """
+    try:
+        import moderngl
+    except ImportError:
+        raise RuntimeError(
+            "OpenGL shader回退需要 moderngl 包。\n"
+            "请在 ComfyUI 虚拟环境中安装: pip install moderngl\n"
+            "（DepthFlow之所以能渲染shader就是因为用了moderngl+EGL）"
+        )
+    import cv2 as _cv2
+
+    # --- Read & convert shader ---
+    shader_text = Path(shader_file_path).read_text(encoding="utf-8")
+    frag_src = _parse_mpv_shader_to_fragment(shader_text)
+
+    vert_src = (
+        "#version 330 core\n"
+        "in vec2 in_pos;\n"
+        "in vec2 in_uv;\n"
+        "out vec2 v_uv;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(in_pos, 0.0, 1.0);\n"
+        "    v_uv = in_uv;\n"
+        "}\n"
+    )
+
+    # --- Open video ---
+    cap = _cv2.VideoCapture(input_video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"无法打开视频: {input_video_path}")
+
+    width = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(_cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+
+    # --- Create GL context ---
+    ctx = None
+    for backend in ("egl", None):  # try EGL first, then default
+        try:
+            if backend:
+                ctx = moderngl.create_standalone_context(backend=backend)
+            else:
+                ctx = moderngl.create_standalone_context()
+            break
+        except Exception:
+            continue
+    if ctx is None:
+        cap.release()
+        raise RuntimeError("无法创建 OpenGL 上下文（EGL 和默认后端均失败）")
+
+    try:
+        prog = ctx.program(vertex_shader=vert_src, fragment_shader=frag_src)
+    except Exception as e:
+        ctx.release()
+        cap.release()
+        raise RuntimeError(f"GLSL shader编译失败:\n{e}\n\n转换后的fragment shader:\n{frag_src[:500]}")
+
+    # Full-screen quad (pos_x, pos_y, uv_x, uv_y)
+    quad = np.array([-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1], dtype="f4")
+    vbo = ctx.buffer(quad)
+    vao = ctx.simple_vertex_array(prog, vbo, "in_pos", "in_uv")
+
+    tex = ctx.texture((width, height), 3)
+    tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+    color_att = ctx.texture((width, height), 4)
+    fbo = ctx.framebuffer(color_attachments=[color_att])
+
+    # Uniforms (set only if present in the shader)
+    if "u_tex" in prog:
+        prog["u_tex"].value = 0
+    if "u_tex_size" in prog:
+        prog["u_tex_size"].value = (float(width), float(height))
+    if "u_tex_pt" in prog:
+        prog["u_tex_pt"].value = (1.0 / width, 1.0 / height)
+
+    # --- Encode output (temp without audio) ---
+    temp_path = output_path + ".tmp_gl.mp4"
+    fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
+    writer = _cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
+    if not writer.isOpened():
+        ctx.release()
+        cap.release()
+        raise RuntimeError(f"无法创建输出视频: {temp_path}")
+
+    frame_idx = 0
+    print(f"[VHS OpenGL] 开始帧处理 ({width}x{height}, {total_frames} frames)…")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # BGR→RGB, flip Y for OpenGL
+        rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+        rgb = np.ascontiguousarray(np.flip(rgb, axis=0))
+        tex.write(rgb.tobytes())
+
+        fbo.use()
+        tex.use(location=0)
+        vao.render(moderngl.TRIANGLE_STRIP)
+
+        data = fbo.read(components=4)
+        out_frame = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 4)
+        out_frame = np.flip(out_frame, axis=0)
+        bgr = _cv2.cvtColor(out_frame, _cv2.COLOR_RGBA2BGR)
+        writer.write(bgr)
+
+        frame_idx += 1
+        if frame_idx % 100 == 0:
+            print(f"[VHS OpenGL] {frame_idx}/{total_frames}")
+
+    cap.release()
+    writer.release()
+    tex.release()
+    color_att.release()
+    fbo.release()
+    vbo.release()
+    vao.release()
+    ctx.release()
+    print(f"[VHS OpenGL] 帧处理完成 ({frame_idx} frames)")
+
+    # --- Mux audio back if needed ---
+    if keep_audio:
+        _ffmpeg_bin = ffmpeg_path or "ffmpeg"
+        mux_cmd = [
+            _ffmpeg_bin, "-y", "-v", "error",
+            "-i", temp_path,
+            "-i", input_video_path,
+            "-c:v", "copy", "-c:a", "copy",
+            "-map", "0:v:0", "-map", "1:a?",
+            output_path,
+        ]
+        mux = subprocess.run(mux_cmd, capture_output=True, text=True)
+        try:
+            Path(temp_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        if mux.returncode != 0:
+            raise RuntimeError(f"OpenGL shader完成但音频混流失败:\n{mux.stderr.strip()}")
+    else:
+        Path(temp_path).replace(output_path)
+
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Main entry: apply GLSL shader to video
+# ---------------------------------------------------------------------------
+
+def _apply_gpu_shader_ffmpeg(
+    input_video_path: str,
+    shader_file_path: str,
+    output_file_prefix: str,
+    backend: str,
+    codec: str,
+    keep_audio: bool,
+) -> str:
+    """
+    Apply a GLSL shader to a video.
+
+    Strategy (stops at first success):
+      1. ffmpeg libplacebo (normal Vulkan)
+      2. ffmpeg libplacebo + ``-init_hw_device vulkan``
+      3. ffmpeg libplacebo + ``allow_sw=1`` (newer ffmpeg)
+      4. ffmpeg libplacebo forced through lavapipe ICD
+      5. Frame-by-frame OpenGL via moderngl/EGL (same as DepthFlow)
+    """
     ffmpeg_bin = ffmpeg_path or "ffmpeg"
     out_name = f"{output_file_prefix}{_now_stamp()}.mp4"
     out_path = str((Path(folder_paths.get_output_directory()) / out_name).resolve())
-
-    be = str(backend or "libplacebo_vulkan").strip().lower()
-    if be not in GPU_SHADER_BACKENDS:
-        be = "libplacebo_vulkan"
 
     c = str(codec or "libx264").strip().lower()
     if c not in GPU_SHADER_CODECS:
         c = "libx264"
 
     shader_escaped = _escape_ffmpeg_filter_path(shader_file_path)
-    if be == "libplacebo_vulkan":
-        vf = f"libplacebo=custom_shader_path='{shader_escaped}'"
-    else:
-        vf = f"libplacebo=custom_shader_path='{shader_escaped}'"
+    vf = f"libplacebo=custom_shader_path='{shader_escaped}'"
+    audio_args = (["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"] if keep_audio else ["-an"])
 
-    cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-v",
-        "error",
-        "-i",
-        input_video_path,
-        "-vf",
-        vf,
-        "-c:v",
-        c,
-        "-pix_fmt",
-        "yuv420p",
-    ]
-    if keep_audio:
-        cmd += ["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"]
-    else:
-        cmd += ["-an"]
-    cmd += [out_path]
+    errors: list[str] = []
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
+    def _run(cmd, *, env=None):
+        return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+    # ---- Strategy 1: normal libplacebo ----
+    cmd1 = [ffmpeg_bin, "-y", "-v", "error", "-i", input_video_path,
+            "-vf", vf, "-c:v", c, "-pix_fmt", "yuv420p"] + audio_args + [out_path]
+    r = _run(cmd1)
+    if r.returncode == 0:
+        return out_path
+    errors.append(f"libplacebo: {r.stderr.strip()[:200]}")
+
+    stderr_lower = r.stderr.lower()
+    is_vulkan_issue = any(kw in stderr_lower for kw in (
+        "vulkan", "no suitable device", "failed creating",
+        "failed initializing", "vk_icd", "libplacebo",
+    ))
+    if not is_vulkan_issue:
+        # Not a Vulkan problem – don't bother with Vulkan retries
         raise RuntimeError(
-            "GPU Shader 渲染失败（ffmpeg/libplacebo）。\n"
-            "请确认你的 ffmpeg 构建包含 libplacebo/vulkan。\n"
-            f"stderr:\n{res.stderr.strip()}"
+            f"GPU Shader 渲染失败（非Vulkan问题）。\n"
+            f"stderr:\n{r.stderr.strip()}"
         )
-    return out_path
+
+    print("[VHS] libplacebo/Vulkan 常规模式失败，尝试备选方案…")
+
+    # ---- Strategy 2: explicit hw device init ----
+    cmd2 = [ffmpeg_bin, "-y", "-v", "error",
+            "-init_hw_device", "vulkan=vk:0",
+            "-i", input_video_path,
+            "-vf", vf, "-c:v", c, "-pix_fmt", "yuv420p"] + audio_args + [out_path]
+    r2 = _run(cmd2)
+    if r2.returncode == 0:
+        print("[VHS] libplacebo(hw_device init)成功")
+        return out_path
+    errors.append(f"hw_device: {r2.stderr.strip()[:200]}")
+
+    # ---- Strategy 3: allow_sw=1 (newer ffmpeg ≥6.x) ----
+    vf_sw = f"libplacebo=custom_shader_path='{shader_escaped}':allow_sw=1"
+    cmd3 = [ffmpeg_bin, "-y", "-v", "error", "-i", input_video_path,
+            "-vf", vf_sw, "-c:v", c, "-pix_fmt", "yuv420p"] + audio_args + [out_path]
+    r3 = _run(cmd3)
+    if r3.returncode == 0:
+        print("[VHS] libplacebo(software Vulkan)成功")
+        return out_path
+    errors.append(f"allow_sw: {r3.stderr.strip()[:200]}")
+
+    # ---- Strategy 4: force lavapipe ICD ----
+    if sys.platform != "win32":
+        icd_candidates = [
+            "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
+            "/usr/share/vulkan/icd.d/lvp_icd.i686.json",
+            "/etc/vulkan/icd.d/lvp_icd.x86_64.json",
+            "/usr/share/vulkan/icd.d/lvp_icd.json",
+        ]
+        for icd in icd_candidates:
+            if Path(icd).is_file():
+                env4 = os.environ.copy()
+                env4["VK_ICD_FILENAMES"] = icd
+                env4["VK_DRIVER_FILES"] = icd
+                r4 = _run(cmd1, env=env4)  # reuse cmd1 with modified env
+                if r4.returncode == 0:
+                    print(f"[VHS] libplacebo(lavapipe ICD={icd})成功")
+                    return out_path
+                errors.append(f"lavapipe({icd}): {r4.stderr.strip()[:150]}")
+                break
+
+    # ---- Strategy 5: OpenGL frame-by-frame via moderngl (like DepthFlow) ----
+    print("[VHS] 所有 libplacebo 方案均失败，启动 OpenGL(EGL) 逐帧渲染…")
+    try:
+        result = _apply_shader_opengl(
+            input_video_path, shader_file_path, out_path, c, keep_audio,
+        )
+        print("[VHS] OpenGL shader渲染成功 ✓")
+        return result
+    except Exception as gl_err:
+        errors.append(f"OpenGL: {gl_err}")
+
+    # ---- All strategies exhausted ----
+    detail = "\n".join(f"  {i+1}) {e}" for i, e in enumerate(errors))
+    raise RuntimeError(
+        f"GPU Shader 渲染失败，所有方案均不可用:\n{detail}\n\n"
+        f"解决方法:\n"
+        f"  - 安装支持 Vulkan 的 ffmpeg\n"
+        f"  - 或: pip install moderngl (启用OpenGL回退，与DepthFlow同原理)\n"
+        f"  - Linux headless请确保安装 libegl1-mesa-dev\n"
+    )
 
 
 def _make_transition(kind: str, duration: float, easing: str = "ease_in_out", softness: float = 0.5, custom_curve: str = "") -> dict[str, Any] | None:

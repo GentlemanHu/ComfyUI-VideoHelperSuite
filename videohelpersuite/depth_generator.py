@@ -1,4 +1,5 @@
 import os
+import platform
 import subprocess
 import sys
 from datetime import datetime
@@ -16,6 +17,95 @@ import cv2
 
 import folder_paths
 from comfy.utils import ProgressBar
+
+
+def _find_depthflow_executable() -> str:
+    """
+    Cross-platform DepthFlow executable discovery.
+    
+    Search order:
+      1. DEPTHFLOW_PATH env var (explicit user override)
+      2. .venv_depthflow inside the VHS custom node directory (isolated venv)
+      3. System PATH (via shutil.which)
+      4. Common install locations per platform
+    
+    Returns the absolute path to the depthflow executable.
+    Raises FileNotFoundError with helpful instructions if not found.
+    """
+    is_win = platform.system() == "Windows"
+    exe_name = "depthflow.exe" if is_win else "depthflow"
+
+    # --- 1. Explicit env var ---
+    env_path = os.environ.get("DEPTHFLOW_PATH", "").strip()
+    if env_path:
+        p = Path(env_path)
+        # If user points to a directory, look for the exe inside
+        if p.is_dir():
+            for sub in (
+                p / "venv" / ("Scripts" if is_win else "bin") / exe_name,
+                p / ".venv" / ("Scripts" if is_win else "bin") / exe_name,
+                p / ("Scripts" if is_win else "bin") / exe_name,
+                p / exe_name,
+            ):
+                if sub.is_file():
+                    return str(sub.resolve())
+        elif p.is_file():
+            return str(p.resolve())
+
+    # --- 2. .venv_depthflow inside VHS node directory ---
+    vhs_dir = Path(__file__).resolve().parent.parent  # ComfyUI-VideoHelperSuite root
+    venv_dir = vhs_dir / ".venv_depthflow"
+    if venv_dir.is_dir():
+        scripts_dir = venv_dir / ("Scripts" if is_win else "bin")
+        candidate = scripts_dir / exe_name
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    # --- 3. System PATH ---
+    which = shutil.which("depthflow")
+    if which:
+        return str(Path(which).resolve())
+
+    # --- 4. Common install locations ---
+    common_locations = []
+    if is_win:
+        common_locations = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "DepthFlow" / "depthflow.exe",
+            Path.home() / "DepthFlow" / "venv" / "Scripts" / "depthflow.exe",
+        ]
+        # Also check drives for D:\Play\tool\DepthFlow style installs
+        for drive in ("C:", "D:", "E:"):
+            common_locations.append(Path(drive) / "Play" / "tool" / "DepthFlow" / "venv" / "Scripts" / "depthflow.exe")
+    else:
+        common_locations = [
+            Path.home() / ".local" / "bin" / "depthflow",
+            Path("/usr/local/bin/depthflow"),
+            Path("/usr/bin/depthflow"),
+        ]
+
+    for loc in common_locations:
+        try:
+            if loc.is_file():
+                return str(loc.resolve())
+        except (OSError, ValueError):
+            continue
+
+    # --- Not found: build helpful message ---
+    venv_hint = str(vhs_dir / ".venv_depthflow")
+    raise FileNotFoundError(
+        f"DepthFlow executable not found.\n"
+        f"Search locations tried:\n"
+        f"  1. DEPTHFLOW_PATH env var: {env_path or '(not set)'}\n"
+        f"  2. VHS venv: {venv_hint}\n"
+        f"  3. System PATH\n"
+        f"  4. Common install locations\n\n"
+        f"To fix, do ONE of the following:\n"
+        f"  - Create an isolated venv at {venv_hint}:\n"
+        f"      python3.11 -m venv {venv_hint}\n"
+        f"      {venv_hint}/{'Scripts' if is_win else 'bin'}/pip install depthflow\n"
+        f"  - Set the DEPTHFLOW_PATH environment variable to the install directory or executable\n"
+        f"  - Install depthflow globally so it appears on PATH\n"
+    )
 
 # Video cache directory
 VIDEO_CACHE_DIR = os.path.join(folder_paths.get_temp_directory(), "video_cache")
@@ -477,7 +567,8 @@ class DepthFlowGenerator:
         output_path = os.path.join(output_dir, output_filename)
 
         # Use the full path to the depthflow executable
-        depthflow_exe = r"D:\Play\tool\DepthFlow\venv\Scripts\depthflow.exe"
+        depthflow_exe = _find_depthflow_executable()
+        print(f"[DepthFlow] Using executable: {depthflow_exe}")
         
         # Build command with proper structure
         command = [
@@ -560,11 +651,19 @@ class DepthFlowGenerator:
             "--format", output_format,
         ])
         
-        # Set environment variables to fix Unicode issues on Windows
+        # Set environment variables for headless / cross-platform rendering
         env = os.environ.copy()
         env["SHADERFLOW_BACKEND"] = "headless"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        # Linux headless: enable software rendering fallbacks
+        if platform.system() != "Windows":
+            env.setdefault("LIBGL_ALWAYS_SOFTWARE", "0")  # prefer HW, user can override
+            env.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
+            env.setdefault("PYOPENGL_PLATFORM", "egl")
+            # If no DISPLAY and no Wayland, force EGL
+            if not any(env.get(k) for k in ("DISPLAY", "WAYLAND_DISPLAY")):
+                env["PYOPENGL_PLATFORM"] = "egl"
         
         final_path = os.path.abspath(output_path)
         
@@ -652,11 +751,6 @@ class DepthFlowGenerator:
             print(f"[DepthFlow] ==========================================")
             
         except FileNotFoundError as e:
-            if "depthflow.exe" in str(e):
-                raise FileNotFoundError(
-                    f"DepthFlow executable not found at: {depthflow_exe}\n"
-                    "Please ensure DepthFlow is installed at D:\\Play\\tool\\DepthFlow"
-                )
             raise
         except subprocess.CalledProcessError as e:
             error_msg = f"[DepthFlow] ✗ Error: Process failed with return code {e.returncode}"
