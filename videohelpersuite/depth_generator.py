@@ -1124,11 +1124,44 @@ class DepthFlowGenerator:
 
         # Try to import the CUDA renderer from the DepthFlow fork
         cuda_renderer = None
-        for search_path in [
-            Path("D:/Play/DepthFlow"),
-            Path(__file__).resolve().parent.parent.parent.parent / "DepthFlow",
-            Path(os.environ.get("DEPTHFLOW_PATH", "")) if os.environ.get("DEPTHFLOW_PATH") else None,
-        ]:
+
+        # Build search paths: venv site-packages, local dev, env var
+        vhs_dir = Path(__file__).resolve().parent.parent
+        search_paths = []
+
+        # 1. The .venv_depthflow's installed depthflow package (cloud / production)
+        venv_sp = vhs_dir / ".venv_depthflow"
+        if venv_sp.is_dir():
+            for sp in (venv_sp / "lib").glob("python*/site-packages/depthflow"):
+                search_paths.append(sp.parent.parent.parent.parent)  # back to venv root? No — we want the parent of depthflow/
+                # Actually we want the dir containing depthflow/, which IS the site-packages dir
+                # But our loop below looks for search_path / "depthflow" / "cuda_renderer.py"
+                # So we need the site-packages dir itself
+                search_paths.append(sp.parent)  # site-packages/
+            # Windows venv layout
+            win_sp = venv_sp / "Lib" / "site-packages" / "depthflow"
+            if win_sp.is_dir():
+                search_paths.append(win_sp.parent)
+
+        # 2. Try to find via the depthflow module itself (if importable)
+        try:
+            import importlib
+            df_mod = importlib.import_module("depthflow")
+            df_init = Path(df_mod.__file__).resolve().parent
+            search_paths.append(df_init.parent)
+        except Exception:
+            pass
+
+        # 3. Local development paths
+        search_paths.append(Path("D:/Play/DepthFlow"))
+        search_paths.append(vhs_dir.parent.parent / "DepthFlow")
+
+        # 4. DEPTHFLOW_PATH env var
+        env_dp = os.environ.get("DEPTHFLOW_PATH", "").strip()
+        if env_dp:
+            search_paths.append(Path(env_dp))
+
+        for search_path in search_paths:
             if search_path is None:
                 continue
             mod_path = search_path / "depthflow" / "cuda_renderer.py"
@@ -1139,6 +1172,7 @@ class DepthFlowGenerator:
                 )
                 cuda_renderer = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(cuda_renderer)
+                print(f"[DepthFlow] CUDA renderer found at: {mod_path}")
                 break
 
         if cuda_renderer is None or not cuda_renderer.is_available():
