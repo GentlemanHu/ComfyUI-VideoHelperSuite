@@ -75,6 +75,25 @@ def _now_stamp() -> str:
     return datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
 
 
+def _check_nvenc_available() -> bool:
+    """Probe whether h264_nvenc is usable on this ffmpeg build."""
+    ff = ffmpeg_path or "ffmpeg"
+    try:
+        r = subprocess.run(
+            [ff, "-y", "-v", "error",
+             "-f", "rawvideo", "-pix_fmt", "rgb24",
+             "-s", "16x16", "-r", "1", "-i", "pipe:0",
+             "-frames:v", "1", "-c:v", "h264_nvenc",
+             "-f", "null", "-"],
+            input=bytes(16 * 16 * 3),
+            capture_output=True,
+            timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _split_paths(value: str) -> list[str]:
     if not value:
         return []
@@ -1923,15 +1942,43 @@ def _apply_transition(item, transition: dict[str, Any] | None, clip_duration: fl
         _extend_motion_safe(item, "scale", [t0, t1], [s0, s1], easings=[easing])
 
 
+def _attach_fx_shader_to_clip(clip: dict, fx=None, shader=None) -> dict:
+    """Apply optional MOVIS_FX list and MOVIS_SHADER list to a clip dict in-place.
+
+    MOVIS_FX items with ``_engine == "layered"`` go into ``advanced_fx_layers``;
+    all others go into ``effects``.  MOVIS_SHADER items go into ``clip_shaders``.
+    """
+    if fx and isinstance(fx, list):
+        for item in fx:
+            if not isinstance(item, dict):
+                continue
+            item_clean = {k: v for k, v in item.items() if k != "_engine"}
+            if item.get("_engine") == "layered":
+                existing = clip.setdefault("advanced_fx_layers", [])
+                existing.append(item_clean)
+                clip["use_layered_fx_engine"] = True
+            else:
+                existing = clip.setdefault("effects", [])
+                existing.append(item_clean)
+    if shader and isinstance(shader, list):
+        existing = clip.setdefault("clip_shaders", [])
+        for item in shader:
+            if isinstance(item, dict):
+                existing.append(item)
+    return clip
+
+
 def _smart_bgm_level(timeline: dict[str, Any], default_bgm_db: float = -12.0, duck_db: float = -18.0) -> float:
-    """若存在前景音轨，则自动压低 BGM。"""
+    """若 auto_duck_bgm=True 且存在前景音轨，则自动压低 BGM。"""
     bgm = timeline.get("bgm") or {}
     base = float(bgm.get("audio_level_db", default_bgm_db))
-    has_foreground_audio = len(timeline.get("audio_tracks", [])) > 0 or any(
-        bool(c.get("use_source_audio", False)) for c in timeline.get("video_tracks", [])
-    )
-    if has_foreground_audio:
-        return min(base, float(duck_db))
+    auto_duck = bool(bgm.get("auto_duck_bgm", False))
+    if auto_duck:
+        has_foreground_audio = len(timeline.get("audio_tracks", [])) > 0 or any(
+            bool(c.get("use_source_audio", False)) for c in timeline.get("video_tracks", [])
+        )
+        if has_foreground_audio:
+            return min(base, float(duck_db))
     return base
 
 
@@ -1941,7 +1988,13 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
     height = int(_safe_float(canvas.get("height", 1920), 1920.0, min_value=64.0, max_value=8192.0))
     fps = _safe_float(canvas.get("fps", 30.0), 30.0, min_value=1.0, max_value=240.0)
     bg_color = str(canvas.get("bg_color", "#000000"))
-    duration = _safe_float(_timeline_duration(timeline), 1.0, min_value=0.01)
+    _bgm_meta = timeline.get("bgm") or {}
+    _trim_bgm = bool(_bgm_meta.get("trim_to_video_length", True)) if _bgm_meta.get("path") else False
+    if _trim_bgm:
+        _content_dur = _timeline_content_duration(timeline)
+        duration = _safe_float(_content_dur if _content_dur > 0.01 else _timeline_duration(timeline), 1.0, min_value=0.01)
+    else:
+        duration = _safe_float(_timeline_duration(timeline), 1.0, min_value=0.01)
 
     scene = mv.layer.Composition(size=(width, height), duration=duration)
     render_frame_count = max(1, len(np.arange(0.0, duration, 1.0 / fps)))
@@ -2202,15 +2255,31 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
         return original_write_video(self, start_time, end_time, fps_value, _WriterProxy(writer))
 
     mv.layer.Composition._write_video = _write_video_with_progress
+    # Choose GPU encoder (h264_nvenc) when available, fall back to CPU libx264
+    _movis_codec = "h264_nvenc" if _check_nvenc_available() else "libx264"
+    print(f"[VHS_MOVIS] video codec: {_movis_codec}")
     try:
         scene.write_video(
             out_path,
-            codec="libx264",
+            codec=_movis_codec,
             pixelformat="yuv420p",
             fps=fps,
             audio=True,
             output_params=["-movflags", "+faststart"],
         )
+    except Exception as _enc_err:
+        if _movis_codec != "libx264":
+            print(f"[VHS_MOVIS] {_movis_codec} failed ({_enc_err}), retrying with libx264 ...")
+            scene.write_video(
+                out_path,
+                codec="libx264",
+                pixelformat="yuv420p",
+                fps=fps,
+                audio=True,
+                output_params=["-movflags", "+faststart"],
+            )
+        else:
+            raise
     finally:
         mv.layer.Composition._write_video = original_write_video
 
@@ -2286,6 +2355,8 @@ class MovisAddVideoTrack:
             },
             "optional": {
                 "vhs_filenames": ("VHS_FILENAMES",),
+                "fx": ("MOVIS_FX", {"tooltip": "可选：MOVIS_FX特效，自动绑定到本片段，无需设置clip_index"}),
+                "shader": ("MOVIS_SHADER", {"tooltip": "可选：MOVIS_SHADER，自动绑定到本片段"}),
             },
         }
 
@@ -2294,7 +2365,7 @@ class MovisAddVideoTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_video"
 
-    def add_video(self, timeline, video_path, placement_mode, start, duration, source_start, fade_in, fade_out, use_source_audio, audio_level_db, position_x, position_y, scale_x, scale_y, rotation, opacity, transition_in, transition_in_duration, transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve, vhs_filenames=None):
+    def add_video(self, timeline, video_path, placement_mode, start, duration, source_start, fade_in, fade_out, use_source_audio, audio_level_db, position_x, position_y, scale_x, scale_y, rotation, opacity, transition_in, transition_in_duration, transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve, vhs_filenames=None, fx=None, shader=None):
         t = _clone_timeline(timeline)
         path = _resolve_video_input(video_path, vhs_filenames=vhs_filenames)
         clip_duration = _safe_float(duration, 0.0, min_value=0.0)
@@ -2302,8 +2373,7 @@ class MovisAddVideoTrack:
             clip_duration = _video_duration(path)
         start_base = _timeline_content_duration(t) if str(placement_mode) == "append" else 0.0
         resolved_start = start_base + _safe_float(start, 0.0, min_value=0.0)
-        t["video_tracks"].append(
-            {
+        clip = {
                 "path": path,
                 "is_image": False,
                 "start": resolved_start,
@@ -2321,8 +2391,9 @@ class MovisAddVideoTrack:
                 "opacity": _safe_float(opacity, 1.0, min_value=0.0, max_value=1.0),
                 "transition_in": _make_transition(transition_in, transition_in_duration, transition_easing, transition_softness, transition_custom_curve),
                 "transition_out": _make_transition(transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve),
-            }
-        )
+        }
+        _attach_fx_shader_to_clip(clip, fx=fx, shader=shader)
+        t["video_tracks"].append(clip)
         return (t,)
 
 
@@ -2357,6 +2428,8 @@ class MovisAddImageTrack:
             },
             "optional": {
                 "image": ("IMAGE",),
+                "fx": ("MOVIS_FX", {"tooltip": "可选：MOVIS_FX特效，自动绑定到本片段"}),
+                "shader": ("MOVIS_SHADER", {"tooltip": "可选：MOVIS_SHADER，自动绑定到本片段"}),
             },
         }
 
@@ -2365,11 +2438,10 @@ class MovisAddImageTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_image"
 
-    def add_image(self, timeline, image_path, start, duration, fade_in, fade_out, position_x, position_y, scale_x, scale_y, rotation, opacity, transition_in, transition_in_duration, transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, image=None):
+    def add_image(self, timeline, image_path, start, duration, fade_in, fade_out, position_x, position_y, scale_x, scale_y, rotation, opacity, transition_in, transition_in_duration, transition_out, transition_out_duration, transition_easing, transition_softness, transition_custom_curve, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, image=None, fx=None, shader=None):
         t = _clone_timeline(timeline)
         path = _resolve_image_input(image_path, image=image, prefix="movis_add_image")
-        t["video_tracks"].append(
-            {
+        clip = {
                 "path": path,
                 "is_image": True,
                 "start": _safe_float(start, 0.0, min_value=0.0),
@@ -2391,8 +2463,9 @@ class MovisAddImageTrack:
                 "image_anchor_x": _safe_float(image_anchor_x, 0.5, min_value=0.0, max_value=1.0),
                 "image_anchor_y": _safe_float(image_anchor_y, 0.5, min_value=0.0, max_value=1.0),
                 "image_bg_color": str(image_bg_color),
-            }
-        )
+        }
+        _attach_fx_shader_to_clip(clip, fx=fx, shader=shader)
+        t["video_tracks"].append(clip)
         return (t,)
 
 
@@ -2452,7 +2525,11 @@ class MovisAddImageSequenceTrack:
                 "image_anchor_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "tooltip": "水平锚点"}),
                 "image_anchor_y": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "tooltip": "垂直锚点"}),
                 "image_bg_color": ("STRING", {"default": "#00000000", "tooltip": "背景填充色（contain/center_inside）"}),
-            }
+            },
+            "optional": {
+                "fx": ("MOVIS_FX", {"tooltip": "可选：MOVIS_FX特效，应用到序列内所有图片片段"}),
+                "shader": ("MOVIS_SHADER", {"tooltip": "可选：MOVIS_SHADER，应用到序列内所有图片片段"}),
+            },
         }
 
     RETURN_TYPES = ("MOVIS_TIMELINE", "INT", "FLOAT")
@@ -2460,7 +2537,7 @@ class MovisAddImageSequenceTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_images"
 
-    def add_images(self, timeline, images, start, seconds_per_image, durations_csv, fade_in, fade_out, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color):
+    def add_images(self, timeline, images, start, seconds_per_image, durations_csv, fade_in, fade_out, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, fx=None, shader=None):
         t = _clone_timeline(timeline)
         image_files = _save_images(images, f"movis_img_seq_{_now_stamp()}")
         durations = _parse_float_list(durations_csv)
@@ -2470,8 +2547,7 @@ class MovisAddImageSequenceTrack:
             dur = float(seconds_per_image)
             if idx < len(durations):
                 dur = max(0.01, float(durations[idx]))
-            t["video_tracks"].append(
-                {
+            clip = {
                     "path": p,
                     "is_image": True,
                     "start": cursor,
@@ -2491,8 +2567,9 @@ class MovisAddImageSequenceTrack:
                     "image_anchor_x": float(image_anchor_x),
                     "image_anchor_y": float(image_anchor_y),
                     "image_bg_color": str(image_bg_color),
-                }
-            )
+            }
+            _attach_fx_shader_to_clip(clip, fx=fx, shader=shader)
+            t["video_tracks"].append(clip)
             cursor += dur
             total_duration += dur
         fps = float(t["canvas"]["fps"])
@@ -2525,6 +2602,8 @@ class MovisAddImageMotionTrack:
             },
             "optional": {
                 "image": ("IMAGE",),
+                "fx": ("MOVIS_FX", {"tooltip": "可选：MOVIS_FX特效，自动绑定到本片段"}),
+                "shader": ("MOVIS_SHADER", {"tooltip": "可选：MOVIS_SHADER，自动绑定到本片段"}),
             },
         }
 
@@ -2533,7 +2612,7 @@ class MovisAddImageMotionTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_motion"
 
-    def add_motion(self, timeline, image_path, start, duration, keyframe_times_csv, position_x_csv, position_y_csv, scale_x_csv, scale_y_csv, rotation_csv, opacity_csv, easing_csv, fade_in, fade_out, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, image=None):
+    def add_motion(self, timeline, image_path, start, duration, keyframe_times_csv, position_x_csv, position_y_csv, scale_x_csv, scale_y_csv, rotation_csv, opacity_csv, easing_csv, fade_in, fade_out, image_scale_mode, image_anchor_x, image_anchor_y, image_bg_color, image=None, fx=None, shader=None):
         t = _clone_timeline(timeline)
         path = _resolve_image_input(image_path, image=image, prefix="movis_image_motion")
 
@@ -2551,8 +2630,7 @@ class MovisAddImageMotionTrack:
         op = _parse_float_list(opacity_csv)
         easings = _parse_str_list(easing_csv)
 
-        t["video_tracks"].append(
-            {
+        clip = {
                 "path": path,
                 "is_image": True,
                 "start": float(start),
@@ -2582,8 +2660,9 @@ class MovisAddImageMotionTrack:
                     "opacity": op,
                     "easings": easings,
                 },
-            }
-        )
+        }
+        _attach_fx_shader_to_clip(clip, fx=fx, shader=shader)
+        t["video_tracks"].append(clip)
         return (t,)
 
 
@@ -2612,6 +2691,8 @@ class MovisAddVideoMotionTrack:
             },
             "optional": {
                 "vhs_filenames": ("VHS_FILENAMES",),
+                "fx": ("MOVIS_FX", {"tooltip": "可选：MOVIS_FX特效，自动绑定到本片段"}),
+                "shader": ("MOVIS_SHADER", {"tooltip": "可选：MOVIS_SHADER，自动绑定到本片段"}),
             },
         }
 
@@ -2620,7 +2701,7 @@ class MovisAddVideoMotionTrack:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_video_motion"
 
-    def add_video_motion(self, timeline, video_path, start, duration, source_start, keyframe_times_csv, position_x_csv, position_y_csv, scale_x_csv, scale_y_csv, rotation_csv, opacity_csv, easing_csv, fade_in, fade_out, use_source_audio, audio_level_db, vhs_filenames=None):
+    def add_video_motion(self, timeline, video_path, start, duration, source_start, keyframe_times_csv, position_x_csv, position_y_csv, scale_x_csv, scale_y_csv, rotation_csv, opacity_csv, easing_csv, fade_in, fade_out, use_source_audio, audio_level_db, vhs_filenames=None, fx=None, shader=None):
         t = _clone_timeline(timeline)
         path = _resolve_video_input(video_path, vhs_filenames=vhs_filenames)
         clip_duration = float(duration) if float(duration) > 0 else _video_duration(path)
@@ -2638,8 +2719,7 @@ class MovisAddVideoMotionTrack:
         op = _parse_float_list(opacity_csv)
         easings = _parse_str_list(easing_csv)
 
-        t["video_tracks"].append(
-            {
+        clip = {
                 "path": path,
                 "is_image": False,
                 "start": float(start),
@@ -2665,8 +2745,9 @@ class MovisAddVideoMotionTrack:
                     "opacity": op,
                     "easings": easings,
                 },
-            }
-        )
+        }
+        _attach_fx_shader_to_clip(clip, fx=fx, shader=shader)
+        t["video_tracks"].append(clip)
         return (t,)
 
 class MovisAddAudioTrack:
@@ -2738,8 +2819,10 @@ class MovisSetBGM:
             "required": {
                 "timeline": ("MOVIS_TIMELINE",),
                 "bgm_path": ("STRING", {"default": "", "placeholder": "可留空，改接 AUDIO", "tooltip": "全局BGM，仅保留一条，会覆盖此前设置"}),
-                "audio_level_db": ("FLOAT", {"default": -12.0, "min": -60.0, "max": 24.0}),
+                "audio_level_db": ("FLOAT", {"default": -12.0, "min": -60.0, "max": 40.0, "tooltip": "BGM增益(dB)；已提高上限至40dB，如仍感觉偏小可继续调高"}),
                 "source_start": ("FLOAT", {"default": 0.0, "min": 0.0}),
+                "trim_to_video_length": ("BOOLEAN", {"default": True, "tooltip": "BGM超出视频内容总时长时自动截断，防止末尾黑屏；关闭则以BGM文件原长为准"}),
+                "auto_duck_bgm": ("BOOLEAN", {"default": False, "tooltip": "检测到前景音轨(视频自带音/外部音轨)时自动将BGM压低至-18dB；默认关闭，需要时手动开启"}),
             },
             "optional": {
                 "audio": ("AUDIO",),
@@ -2751,14 +2834,16 @@ class MovisSetBGM:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "set_bgm"
 
-    def set_bgm(self, timeline, bgm_path, audio_level_db, source_start, audio=None):
+    def set_bgm(self, timeline, bgm_path, audio_level_db, source_start, trim_to_video_length=True, auto_duck_bgm=False, audio=None):
         t = _clone_timeline(timeline)
         path = _resolve_audio_input(bgm_path, audio=audio, prefix="movis_bgm")
         t["bgm"] = {
             "path": path,
-            "audio_level_db": _safe_float(audio_level_db, -12.0, min_value=-60.0, max_value=24.0),
+            "audio_level_db": _safe_float(audio_level_db, -12.0, min_value=-60.0, max_value=40.0),
             "source_start": _safe_float(source_start, 0.0, min_value=0.0),
             "duration": _audio_duration(path),
+            "trim_to_video_length": bool(trim_to_video_length),
+            "auto_duck_bgm": bool(auto_duck_bgm),
         }
         return (t,)
 
@@ -3677,6 +3762,150 @@ class MovisTimelinePro:
 
         out_path, _audio, frames, duration = _render_timeline(timeline, output_file_prefix, notify_all)
         return {"ui": {"video_path": out_path, "frames": [frames]}, "result": (out_path, frames, duration)}
+
+
+# ---------------------------------------------------------------------------
+# MOVIS_FX / MOVIS_SHADER builder nodes
+# These nodes produce standalone FX/shader config objects that can be wired
+# directly into any track-adding node's optional fx / shader input, so you
+# never need to manually set clip_index.
+# ---------------------------------------------------------------------------
+
+class MovisBuildFX:
+    """Build a MOVIS_FX config and wire it into any Add*Track node's optional fx input."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "effect": (FX_TYPES, {"default": "glitch", "tooltip": "特效类型"}),
+                "start_norm": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "tooltip": "特效开始时间（片段归一化 0~1）"}),
+                "end_norm": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "tooltip": "特效结束时间（片段归一化 0~1）"}),
+                "intensity": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 20.0}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+                "engine": (["basic", "layered"], {"default": "basic", "tooltip": "basic: 普通特效引擎；layered: 分层特效引擎（可与动画/转场同时叠加）"}),
+                "custom_curve": ("STRING", {"default": "", "placeholder": "仅 custom 推荐：0:0.5,0.2:1,0.8:0,1:0.5"}),
+            },
+            "optional": {
+                "chain": ("MOVIS_FX", {"tooltip": "可选：将本特效追加到已有 MOVIS_FX 列表末尾"}),
+            },
+        }
+
+    RETURN_TYPES = ("MOVIS_FX",)
+    RETURN_NAMES = ("fx",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "build_fx"
+
+    def build_fx(self, effect, start_norm, end_norm, intensity, speed, seed, engine, custom_curve, chain=None):
+        fx = _make_fx(effect, start_norm, end_norm, intensity, speed, seed, custom_curve)
+        if fx is None:
+            return (list(chain) if chain else [],)
+        fx["_engine"] = str(engine)
+        result = list(chain) if isinstance(chain, list) else []
+        result.append(fx)
+        return (result,)
+
+
+class MovisBuildFXPreset:
+    """Build a MOVIS_FX list from a preset and wire it into any Add*Track node."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset": (FX_PRESETS, {"default": "cyber_glitch", "tooltip": "预设：一键酷炫效果"}),
+                "strength": ("FLOAT", {"default": 0.85, "min": 0.05, "max": 2.0}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+                "engine": (["basic", "layered"], {"default": "basic"}),
+            },
+            "optional": {
+                "chain": ("MOVIS_FX", {"tooltip": "可选：将本预设追加到已有 MOVIS_FX 列表末尾"}),
+            },
+        }
+
+    RETURN_TYPES = ("MOVIS_FX",)
+    RETURN_NAMES = ("fx",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "build_preset"
+
+    def build_preset(self, preset, strength, seed, engine, chain=None):
+        fx_list = [x for x in _build_fx_preset(preset, strength, seed) if isinstance(x, dict)]
+        for item in fx_list:
+            item["_engine"] = str(engine)
+        result = list(chain) if isinstance(chain, list) else []
+        result.extend(fx_list)
+        return (result,)
+
+
+class MovisChainFX:
+    """Merge two MOVIS_FX lists into one (for stacking multiple FX on the same clip)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "fx_a": ("MOVIS_FX",),
+            },
+            "optional": {
+                "fx_b": ("MOVIS_FX",),
+                "fx_c": ("MOVIS_FX",),
+            },
+        }
+
+    RETURN_TYPES = ("MOVIS_FX",)
+    RETURN_NAMES = ("fx",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "chain_fx"
+
+    def chain_fx(self, fx_a, fx_b=None, fx_c=None):
+        result = list(fx_a) if isinstance(fx_a, list) else []
+        if isinstance(fx_b, list):
+            result.extend(fx_b)
+        if isinstance(fx_c, list):
+            result.extend(fx_c)
+        return (result,)
+
+
+class MovisBuildShader:
+    """Build a MOVIS_SHADER config and wire it into any Add*Track node's optional shader input."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "shader_path": ("STRING", {"default": "", "placeholder": "GLSL shader 文件路径（可空）"}),
+                "shader_code": ("STRING", {"default": "", "multiline": True, "placeholder": "可直接粘贴 GLSL 代码；非空时优先于 shader_path"}),
+                "backend": (GPU_SHADER_BACKENDS, {"default": "libplacebo_vulkan"}),
+                "codec": (GPU_SHADER_CODECS, {"default": "libx264"}),
+                "keep_audio": ("BOOLEAN", {"default": True}),
+                "enabled": ("BOOLEAN", {"default": True}),
+                "output_file_prefix": ("STRING", {"default": "movis_clip_shader_"}),
+            },
+            "optional": {
+                "chain": ("MOVIS_SHADER", {"tooltip": "可选：将本shader追加到已有 MOVIS_SHADER 列表末尾"}),
+            },
+        }
+
+    RETURN_TYPES = ("MOVIS_SHADER",)
+    RETURN_NAMES = ("shader",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "build_shader"
+
+    def build_shader(self, shader_path, shader_code, backend, codec, keep_audio, enabled, output_file_prefix, chain=None):
+        entry = _normalize_clip_shader_entry({
+            "shader_path": shader_path,
+            "shader_code": shader_code,
+            "backend": backend,
+            "codec": codec,
+            "keep_audio": bool(keep_audio),
+            "enabled": bool(enabled),
+            "output_file_prefix": output_file_prefix,
+        })
+        result = list(chain) if isinstance(chain, list) else []
+        if entry is not None:
+            result.append(entry)
+        return (result,)
 
 
 class CompositeMedia:

@@ -67,6 +67,10 @@ try:
         MovisSetClipShader,
         MovisTrimClip,
         MovisDeleteClip,
+        MovisBuildFX,
+        MovisBuildFXPreset,
+        MovisChainFX,
+        MovisBuildShader,
     )
     HAS_VIDEO_OPS = True
 except ImportError:
@@ -2200,6 +2204,10 @@ if HAS_CUSTOM_FEATURES:
             "VHS_MOVIS_TimelinePro": MovisTimelinePro,
             "VHS_MOVIS_COMPOSITE": CompositeMedia,
             "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
+            "VHS_MOVIS_BuildFX": MovisBuildFX,
+            "VHS_MOVIS_BuildFXPreset": MovisBuildFXPreset,
+            "VHS_MOVIS_ChainFX": MovisChainFX,
+            "VHS_MOVIS_BuildShader": MovisBuildShader,
         })
         NODE_DISPLAY_NAME_MAPPINGS.update({
             "VHS_MOVIS_CreateTimeline": "Movis Create Timeline 🎬🎥🅥🅗🅢",
@@ -2230,6 +2238,10 @@ if HAS_CUSTOM_FEATURES:
             "VHS_MOVIS_TimelinePro": "Movis Timeline Pro 🎬🎥🅥🅗🅢",
             "VHS_MOVIS_COMPOSITE": "Movis Composite (Deprecated) 🎥🅥🅗🅢",
             "VHS_MOVIS_MultiVideo": "Movis Multi-Video (Deprecated) 🎥🅥🅗🅢",
+            "VHS_MOVIS_BuildFX": "Movis Build FX 🎬✨🎥🅥🅗🅢",
+            "VHS_MOVIS_BuildFXPreset": "Movis Build FX Preset 🎬⚡🎥🅥🅗🅢",
+            "VHS_MOVIS_ChainFX": "Movis Chain FX 🎬🔗🎥🅥🅗🅢",
+            "VHS_MOVIS_BuildShader": "Movis Build Shader 🎬🧠🔧🎥🅥🅗🅢",
         })
     except NameError:
         print("Movis nodes not available")
