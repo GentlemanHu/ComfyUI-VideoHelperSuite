@@ -754,6 +754,8 @@ class DepthFlowGenerator:
                 isometric=isometric,
                 video_codec=video_codec,
                 depth_estimator=depth_estimator,
+                output_frames=output_frames,
+                max_frames_export=max_frames_export,
             )
         except Exception as cuda_err:
             print(f"[DepthFlow] CUDA direct render failed: {cuda_err}")
@@ -815,7 +817,7 @@ class DepthFlowGenerator:
         # Add camera movement with parameters (if not static)
         if camera_movement != "static":
             command.append(camera_movement)
-            command.extend(["-i", str(movement_intensity)])
+            command.extend(["--intensity", str(movement_intensity)])
             
             # Common parameters for most movements
             # vertical, horizontal, zoom, dolly support these
@@ -1141,6 +1143,7 @@ class DepthFlowGenerator:
         camera_movement, movement_intensity, movement_smooth,
         movement_loop, movement_reverse, movement_phase,
         steady_depth, isometric, video_codec, depth_estimator,
+        output_frames=True, max_frames_export=0,
     ) -> bool:
         """Attempt to render directly on CUDA.  Returns True on success."""
         if not torch.cuda.is_available():
