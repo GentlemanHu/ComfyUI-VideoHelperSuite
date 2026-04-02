@@ -769,13 +769,33 @@ class DepthFlowGenerator:
                     os.remove(input_path)
             except OSError:
                 pass
-            # Jump to frame extraction
-            return self._finalize_output(
-                final_path, output_filename,
-                target_width, target_height,
-                output_frames, max_frames_export,
-                show_progress=False,
-            )
+
+            # Build frames tensor from captured frames (no video re-decode)
+            frames_tensor = None
+            captured = getattr(self, '_cuda_captured_frames', None)
+            if output_frames and captured:
+                print(f"[DepthFlow] Building tensor from {len(captured)} captured frames...")
+                # Each frame is (H, W, 3) uint8 CPU tensor
+                frames_tensor = torch.stack(captured).float() / 255.0
+                print(f"[DepthFlow] ✓ Frames tensor: {frames_tensor.shape} "
+                      f"({frames_tensor.nbytes / (1024**2):.0f} MB)")
+                self._cuda_captured_frames = None  # free memory
+
+            if frames_tensor is None:
+                frames_tensor = torch.zeros(
+                    (1, target_height, target_width, 3), dtype=torch.float32,
+                )
+
+            return {
+                "ui": {
+                    "video": [{
+                        "filename": output_filename,
+                        "subfolder": "depthflow_videos",
+                        "type": "output",
+                    }]
+                },
+                "result": (final_path, frames_tensor),
+            }
 
         # ═══════════════════════════════════════════════════════════
         # ======  Subprocess OpenGL path (original)              =====
@@ -1205,6 +1225,9 @@ class DepthFlowGenerator:
         def _progress(cur, total):
             pbar.update_absolute(cur, total)
 
+        # Capture frames directly during render to avoid re-decoding mp4
+        max_cap = max_frames_export if max_frames_export > 0 else -1
+
         renderer.render_video(
             output_path=output_path,
             render_w=target_width,
@@ -1224,7 +1247,11 @@ class DepthFlowGenerator:
             codec=video_codec,
             output_format=output_format,
             progress_cb=_progress,
+            capture_frames=max_cap if output_frames else 0,
         )
+
+        # Stash captured frames for _finalize_output to use
+        self._cuda_captured_frames = getattr(renderer, 'captured_frames', None)
 
         if not os.path.exists(output_path):
             return False
