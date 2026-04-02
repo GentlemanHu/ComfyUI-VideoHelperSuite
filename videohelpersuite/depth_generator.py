@@ -499,7 +499,7 @@ class DepthFlowGenerator:
     FUNCTION = "run_depthflow"
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     
-    def extract_video_frames(self, video_path, max_frames=None, use_memory_efficient_mode=False):
+    def extract_video_frames(self, video_path, max_frames=None, use_memory_efficient_mode=False, show_progress=True):
         """
         从视频文件中高效提取所有帧
         
@@ -539,7 +539,7 @@ class DepthFlowGenerator:
             print(f"[DepthFlow] Loading {frames_to_load} frames...")
             
             # 创建进度条
-            pbar = ProgressBar(frames_to_load)
+            pbar = ProgressBar(frames_to_load) if show_progress else None
             
             # 预分配帧数组
             frames_list = []
@@ -559,7 +559,8 @@ class DepthFlowGenerator:
                 
                 frames_list.append(frame)
                 frame_index += 1
-                pbar.update_absolute(frame_index, frames_to_load)
+                if pbar is not None:
+                    pbar.update_absolute(frame_index, frames_to_load)
             
             if not frames_list:
                 raise RuntimeError("No frames could be extracted from video")
@@ -773,6 +774,7 @@ class DepthFlowGenerator:
                 final_path, output_filename,
                 target_width, target_height,
                 output_frames, max_frames_export,
+                show_progress=False,
             )
 
         # ═══════════════════════════════════════════════════════════
@@ -1081,7 +1083,8 @@ class DepthFlowGenerator:
 
     def _finalize_output(self, final_path, output_filename,
                          target_width, target_height,
-                         output_frames, max_frames_export):
+                         output_frames, max_frames_export,
+                         show_progress=True):
         """Common output finalisation for both CUDA and subprocess paths."""
         frames_tensor = None
         if output_frames:
@@ -1091,6 +1094,7 @@ class DepthFlowGenerator:
                 frames_tensor = self.extract_video_frames(
                     final_path, max_frames=max_frames,
                     use_memory_efficient_mode=False,
+                    show_progress=show_progress,
                 )
                 print(f"[DepthFlow] ✓ Video frames extracted successfully")
             except Exception as e:
