@@ -19,6 +19,168 @@ import folder_paths
 from comfy.utils import ProgressBar
 
 
+def _detect_nvidia_gpu() -> bool:
+    """Check if an NVIDIA GPU is available for OpenGL/EGL rendering."""
+    # Quick check: nvidia-smi
+    try:
+        r = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and "NVIDIA" in r.stdout:
+            return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    # Fallback: check if CUDA is available via torch (already loaded by ComfyUI)
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        pass
+    return False
+
+
+def _find_nvidia_egl_icd() -> str | None:
+    """Find the NVIDIA EGL vendor ICD JSON on the system."""
+    candidates = [
+        "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+        "/usr/share/egl/egl_external_platform.d/10_nvidia.json",
+        "/etc/glvnd/egl_vendor.d/10_nvidia.json",
+        "/usr/lib/x86_64-linux-gnu/egl_vendor.d/10_nvidia.json",
+        "/usr/share/glvnd/egl_vendor.d/10_nvidia_wayland.json",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    # Glob search
+    import glob
+    for pattern in (
+        "/usr/share/glvnd/egl_vendor.d/*nvidia*.json",
+        "/etc/glvnd/egl_vendor.d/*nvidia*.json",
+    ):
+        found = glob.glob(pattern)
+        if found:
+            return found[0]
+    return None
+
+
+def _build_depthflow_env() -> dict:
+    """
+    Build the environment dict for the DepthFlow subprocess.
+
+    On Linux headless with an NVIDIA GPU, forces EGL through the NVIDIA
+    driver so that OpenGL rendering uses the GPU (not llvmpipe).
+    """
+    env = os.environ.copy()
+    env["SHADERFLOW_BACKEND"] = "headless"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
+    if platform.system() == "Windows":
+        return env
+
+    # ---- Linux ----
+    env["PYOPENGL_PLATFORM"] = "egl"
+
+    has_nvidia = _detect_nvidia_gpu()
+    if has_nvidia:
+        # Force NVIDIA EGL so moderngl/ShaderFlow picks up the real GPU
+        egl_icd = _find_nvidia_egl_icd()
+        if egl_icd:
+            env["__EGL_VENDOR_LIBRARY_FILENAMES"] = egl_icd
+            print(f"[DepthFlow] NVIDIA EGL ICD found: {egl_icd}")
+
+        # Tell the driver to render offscreen on NVIDIA even without X/Wayland
+        env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+        env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+        # Do NOT set LIBGL_ALWAYS_SOFTWARE when we have a real GPU
+        env.pop("LIBGL_ALWAYS_SOFTWARE", None)
+        env.pop("MESA_GL_VERSION_OVERRIDE", None)
+        print("[DepthFlow] NVIDIA GPU detected → forcing EGL+NVIDIA for OpenGL")
+    else:
+        # Software fallback
+        env.setdefault("LIBGL_ALWAYS_SOFTWARE", "0")
+        env.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
+        print("[DepthFlow] No NVIDIA GPU → using Mesa software OpenGL")
+
+    return env
+
+
+def _has_nvidia_egl_runtime() -> bool:
+    """
+    Check if NVIDIA EGL rendering is *actually* functional at runtime.
+    Returns True only if libEGL_nvidia.so.0 can be loaded (meaning GPU
+    OpenGL will work). CUDA availability alone is NOT enough.
+    """
+    if platform.system() == "Windows":
+        return True  # Windows always has GPU OpenGL when driver is installed
+    try:
+        import ctypes
+        ctypes.cdll.LoadLibrary("libEGL_nvidia.so.0")
+        return True
+    except (OSError, Exception):
+        return False
+
+
+def _ffmpeg_upscale_video(input_path: str, output_path: str, target_w: int,
+                          target_h: int, codec: str = "h264") -> str:
+    """
+    Upscale a video to target resolution using ffmpeg.
+    Tries NVENC encoder first (GPU accelerated), falls back to CPU libx264.
+    """
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+
+    # Map codec names to ffmpeg encoder names
+    nvenc_map = {
+        "h264": "h264_nvenc",
+        "h264-nvenc": "h264_nvenc",
+        "h265": "hevc_nvenc",
+        "h265-nvenc": "hevc_nvenc",
+    }
+    cpu_map = {
+        "h264": "libx264",
+        "h264-nvenc": "libx264",
+        "h265": "libx265",
+        "h265-nvenc": "libx265",
+        "av1-svt": "libsvtav1",
+    }
+
+    scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
+
+    # Try NVENC first (GPU upscale+encode)
+    nvenc = nvenc_map.get(codec)
+    if nvenc:
+        cmd = [
+            ffmpeg_bin, "-y", "-v", "error",
+            "-i", input_path,
+            "-vf", scale_filter,
+            "-c:v", nvenc,
+            "-preset", "p4", "-rc", "vbr", "-cq", "18",
+            "-pix_fmt", "yuv420p",
+            "-map", "0:v:0", "-map", "0:a?", "-c:a", "copy",
+            output_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"[DepthFlow] ✓ NVENC upscale to {target_w}x{target_h} succeeded")
+            return output_path
+
+    # CPU fallback
+    cpu_enc = cpu_map.get(codec, "libx264")
+    cmd = [
+        ffmpeg_bin, "-y", "-v", "error",
+        "-i", input_path,
+        "-vf", scale_filter,
+        "-c:v", cpu_enc,
+        "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-map", "0:v:0", "-map", "0:a?", "-c:a", "copy",
+        output_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg upscale failed: {r.stderr.strip()}")
+    print(f"[DepthFlow] ✓ CPU upscale to {target_w}x{target_h} succeeded")
+    return output_path
+
+
 def _find_depthflow_executable() -> str:
     """
     Cross-platform DepthFlow executable discovery.
@@ -566,6 +728,57 @@ class DepthFlowGenerator:
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, output_filename)
 
+        # ═══════════════════════════════════════════════════════════
+        # ======  CUDA direct rendering (no subprocess/OpenGL)  =====
+        # ═══════════════════════════════════════════════════════════
+        cuda_done = False
+        try:
+            cuda_done = self._try_cuda_render(
+                image_tensor=image,
+                target_width=target_width,
+                target_height=target_height,
+                output_path=output_path,
+                output_format=output_format,
+                duration=duration,
+                fps=fps,
+                quality=quality,
+                ssaa=ssaa,
+                camera_movement=camera_movement,
+                movement_intensity=movement_intensity,
+                movement_smooth=movement_smooth,
+                movement_loop=movement_loop,
+                movement_reverse=movement_reverse,
+                movement_phase=movement_phase,
+                steady_depth=steady_depth,
+                isometric=isometric,
+                video_codec=video_codec,
+                depth_estimator=depth_estimator,
+            )
+        except Exception as cuda_err:
+            print(f"[DepthFlow] CUDA direct render failed: {cuda_err}")
+            print(f"[DepthFlow] Falling back to subprocess OpenGL path...")
+            cuda_done = False
+
+        if cuda_done:
+            final_path = os.path.abspath(output_path)
+            print(f"[DepthFlow] ✓ CUDA direct render complete: {final_path}")
+            # Clean up temp input
+            try:
+                if os.path.exists(input_path):
+                    os.remove(input_path)
+            except OSError:
+                pass
+            # Jump to frame extraction
+            return self._finalize_output(
+                final_path, output_filename,
+                target_width, target_height,
+                output_frames, max_frames_export,
+            )
+
+        # ═══════════════════════════════════════════════════════════
+        # ======  Subprocess OpenGL path (original)              =====
+        # ═══════════════════════════════════════════════════════════
+
         # Use the full path to the depthflow executable
         depthflow_exe = _find_depthflow_executable()
         print(f"[DepthFlow] Using executable: {depthflow_exe}")
@@ -637,11 +850,41 @@ class DepthFlowGenerator:
         if output_format != "gif":
             command.append(video_codec)
         
+        # ---- Detect if GPU OpenGL is available ----
+        # If not (llvmpipe / cloud GPU without libEGL_nvidia), render at
+        # reduced resolution then upscale with ffmpeg (NVENC if available).
+        gpu_opengl = _has_nvidia_egl_runtime()
+        render_width = target_width
+        render_height = target_height
+        needs_upscale = False
+
+        if not gpu_opengl and platform.system() != "Windows":
+            # Calculate a reasonable render resolution:
+            # halve each dimension (4x fewer pixels → ~4x faster on CPU)
+            # but never go below 640 on the short side
+            MIN_DIM = 640
+            scale = 0.5
+            rw = max(MIN_DIM, int(target_width * scale))
+            rh = max(MIN_DIM, int(target_height * scale))
+            # keep even
+            rw = rw - (rw % 2)
+            rh = rh - (rh % 2)
+
+            if rw < target_width or rh < target_height:
+                render_width = rw
+                render_height = rh
+                needs_upscale = True
+                # Also force SSAA to minimum to save more CPU time
+                ssaa = min(ssaa, 0.5)
+                print(f"[DepthFlow] ⚠ No NVIDIA OpenGL (llvmpipe CPU mode detected)")
+                print(f"[DepthFlow] ⚠ Auto-optimizing: render at {render_width}x{render_height} "
+                      f"(SSAA={ssaa}), then upscale to {target_width}x{target_height}")
+
         # Add main rendering parameters
         command.extend([
             "main",
-            "-w", str(target_width),
-            "-h", str(target_height),
+            "-w", str(render_width),
+            "-h", str(render_height),
             "-q", str(quality),
             "-t", str(duration),
             "-f", str(fps),
@@ -652,18 +895,7 @@ class DepthFlowGenerator:
         ])
         
         # Set environment variables for headless / cross-platform rendering
-        env = os.environ.copy()
-        env["SHADERFLOW_BACKEND"] = "headless"
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        # Linux headless: enable software rendering fallbacks
-        if platform.system() != "Windows":
-            env.setdefault("LIBGL_ALWAYS_SOFTWARE", "0")  # prefer HW, user can override
-            env.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
-            env.setdefault("PYOPENGL_PLATFORM", "egl")
-            # If no DISPLAY and no Wayland, force EGL
-            if not any(env.get(k) for k in ("DISPLAY", "WAYLAND_DISPLAY")):
-                env["PYOPENGL_PLATFORM"] = "egl"
+        env = _build_depthflow_env()
         
         final_path = os.path.abspath(output_path)
         
@@ -671,7 +903,9 @@ class DepthFlowGenerator:
         print(f"[DepthFlow] ==========================================")
         print(f"[DepthFlow] Starting video generation")
         print(f"[DepthFlow] Orientation: {orientation}")
-        print(f"[DepthFlow] Resolution: {target_width}x{target_height}")
+        print(f"[DepthFlow] Target Resolution: {target_width}x{target_height}")
+        if needs_upscale:
+            print(f"[DepthFlow] Render Resolution: {render_width}x{render_height} (will upscale)")
         print(f"[DepthFlow] Camera Movement: {camera_movement}")
         print(f"[DepthFlow] Movement Intensity: {movement_intensity}x")
         print(f"[DepthFlow] Quality: {quality}%")
@@ -680,6 +914,9 @@ class DepthFlowGenerator:
         print(f"[DepthFlow] Codec: {video_codec}")
         print(f"[DepthFlow] Format: {output_format}")
         print(f"[DepthFlow] Depth Estimator: {depth_estimator}")
+        print(f"[DepthFlow] GPU OpenGL: {'YES' if gpu_opengl else 'NO (llvmpipe CPU)'}")
+        print(f"[DepthFlow] OpenGL Platform: {env.get('PYOPENGL_PLATFORM', 'default')}")
+        print(f"[DepthFlow] EGL Vendor ICD: {env.get('__EGL_VENDOR_LIBRARY_FILENAMES', 'auto')}")
         print(f"[DepthFlow] Output: {final_path}")
         print(f"[DepthFlow] ==========================================")
         print(f"[DepthFlow] Command: {' '.join(command)}")
@@ -749,6 +986,26 @@ class DepthFlowGenerator:
             print(f"[DepthFlow] ✓ Output: {final_path}")
             print(f"[DepthFlow] ✓ File size: {file_size_mb:.2f} MB")
             print(f"[DepthFlow] ==========================================")
+
+            # ---- Upscale if we rendered at reduced resolution ----
+            if needs_upscale and os.path.exists(final_path):
+                print(f"[DepthFlow] Upscaling {render_width}x{render_height} → {target_width}x{target_height} ...")
+                upscaled_path = final_path.replace(f".{output_format}", f"_upscaled.{output_format}")
+                try:
+                    _ffmpeg_upscale_video(final_path, upscaled_path,
+                                          target_width, target_height, video_codec)
+                    # Replace the original with the upscaled version
+                    os.replace(upscaled_path, final_path)
+                    new_size_mb = os.path.getsize(final_path) / (1024 * 1024)
+                    print(f"[DepthFlow] ✓ Upscale complete: {new_size_mb:.2f} MB")
+                except Exception as upscale_err:
+                    print(f"[DepthFlow] ⚠ Upscale failed ({upscale_err}), keeping {render_width}x{render_height} output")
+                    # Clean up failed upscale file
+                    if os.path.exists(upscaled_path):
+                        try:
+                            os.remove(upscaled_path)
+                        except OSError:
+                            pass
             
         except FileNotFoundError as e:
             raise
@@ -817,6 +1074,179 @@ class DepthFlowGenerator:
             },
             "result": (final_path, frames_tensor if frames_tensor is not None else torch.zeros((1, target_height, target_width, 3), dtype=torch.float32))
         }
+
+    # ================================================================
+    # CUDA direct rendering helpers
+    # ================================================================
+
+    def _finalize_output(self, final_path, output_filename,
+                         target_width, target_height,
+                         output_frames, max_frames_export):
+        """Common output finalisation for both CUDA and subprocess paths."""
+        frames_tensor = None
+        if output_frames:
+            print(f"[DepthFlow] Extracting video frames...")
+            try:
+                max_frames = max_frames_export if max_frames_export > 0 else None
+                frames_tensor = self.extract_video_frames(
+                    final_path, max_frames=max_frames,
+                    use_memory_efficient_mode=False,
+                )
+                print(f"[DepthFlow] ✓ Video frames extracted successfully")
+            except Exception as e:
+                print(f"[DepthFlow] ✗ Frame extraction failed: {e}")
+                frames_tensor = None
+        if frames_tensor is None:
+            frames_tensor = torch.zeros(
+                (1, target_height, target_width, 3), dtype=torch.float32,
+            )
+        return {
+            "ui": {
+                "video": [{
+                    "filename": output_filename,
+                    "subfolder": "depthflow_videos",
+                    "type": "output",
+                }]
+            },
+            "result": (final_path, frames_tensor),
+        }
+
+    def _try_cuda_render(
+        self, *, image_tensor, target_width, target_height,
+        output_path, output_format, duration, fps, quality, ssaa,
+        camera_movement, movement_intensity, movement_smooth,
+        movement_loop, movement_reverse, movement_phase,
+        steady_depth, isometric, video_codec, depth_estimator,
+    ) -> bool:
+        """Attempt to render directly on CUDA.  Returns True on success."""
+        if not torch.cuda.is_available():
+            return False
+
+        # Try to import the CUDA renderer from the DepthFlow fork
+        cuda_renderer = None
+        for search_path in [
+            Path("D:/Play/DepthFlow"),
+            Path(__file__).resolve().parent.parent.parent.parent / "DepthFlow",
+            Path(os.environ.get("DEPTHFLOW_PATH", "")) if os.environ.get("DEPTHFLOW_PATH") else None,
+        ]:
+            if search_path is None:
+                continue
+            mod_path = search_path / "depthflow" / "cuda_renderer.py"
+            if mod_path.is_file():
+                import importlib.util
+                spec = importlib.util.spec_from_file_location(
+                    "depthflow.cuda_renderer", str(mod_path),
+                )
+                cuda_renderer = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(cuda_renderer)
+                break
+
+        if cuda_renderer is None or not cuda_renderer.is_available():
+            print("[DepthFlow] CUDA renderer module not found or CUDA unavailable")
+            return False
+
+        print("[DepthFlow] ═══════════════════════════════════════════")
+        print("[DepthFlow]  🚀 CUDA Direct Rendering (no OpenGL)")
+        print("[DepthFlow] ═══════════════════════════════════════════")
+
+        # --- Prepare image (already a ComfyUI HWC float tensor) ----------
+        img_np = (image_tensor.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+        # --- Estimate depth using a lightweight PyTorch model -------------
+        depth_np = self._estimate_depth_cuda(img_np, depth_estimator)
+
+        # Normalise
+        img_f = img_np.astype(np.float32) / 255.0
+        dep_f = depth_np.astype(np.float32)
+        if dep_f.max() > 1.5:
+            dep_f = dep_f / 255.0
+
+        renderer = cuda_renderer.CudaDepthFlowRenderer(img_f, dep_f)
+        pbar = ProgressBar(int(duration * fps))
+
+        def _progress(cur, total):
+            pbar.update_absolute(cur, total)
+
+        renderer.render_video(
+            output_path=output_path,
+            render_w=target_width,
+            render_h=target_height,
+            fps=fps,
+            duration=duration,
+            ssaa=ssaa,
+            quality_pct=quality,
+            camera_movement=camera_movement,
+            intensity=movement_intensity,
+            smooth=movement_smooth,
+            loop=movement_loop,
+            reverse=movement_reverse,
+            phase=movement_phase,
+            steady_depth=steady_depth,
+            isometric_val=isometric,
+            codec=video_codec,
+            output_format=output_format,
+            progress_cb=_progress,
+        )
+
+        if not os.path.exists(output_path):
+            return False
+
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"[DepthFlow] ✓ CUDA render OK — {size_mb:.1f} MB")
+        return True
+
+    @staticmethod
+    def _estimate_depth_cuda(img_np: np.ndarray, estimator: str = "da2") -> np.ndarray:
+        """Estimate a depth map using DepthAnythingV2 in the ComfyUI process.
+
+        Falls back to a simple Laplacian mock if the model is unavailable, so
+        the rendering pipeline can still be tested.
+        """
+        try:
+            # Try using transformers pipeline (widely available)
+            from transformers import pipeline as hf_pipeline
+            model_ids = {
+                "da2": "depth-anything/Depth-Anything-V2-Small-hf",
+                "da1": "LiheYoung/depth-anything-small-hf",
+            }
+            model_id = model_ids.get(estimator, model_ids["da2"])
+            print(f"[DepthFlow] Estimating depth with {model_id} ...")
+            pipe = hf_pipeline("depth-estimation", model=model_id, device=0)
+            from PIL import Image as _PILImage
+            pil_img = _PILImage.fromarray(img_np)
+            result = pipe(pil_img)
+            depth_pil = result["depth"]
+            depth = np.array(depth_pil, dtype=np.float32)
+            if depth.max() > 0:
+                depth = depth / depth.max()
+            print(f"[DepthFlow] ✓ Depth estimated: {depth.shape}")
+            return depth
+        except Exception as e:
+            print(f"[DepthFlow] ⚠ HF depth estimation failed ({e}), trying torch.hub ...")
+
+        try:
+            # Try torch hub
+            model = torch.hub.load("hustvl/Depth-Anything-V2", "depth_anything_v2_vits",
+                                    pretrained=True, trust_repo=True)
+            model = model.cuda().eval()
+            from PIL import Image as _PILImage
+            import torchvision.transforms as T
+            pil_img = _PILImage.fromarray(img_np)
+            t = T.Compose([T.Resize(518), T.CenterCrop(518),
+                           T.ToTensor(), T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])])
+            inp = t(pil_img).unsqueeze(0).cuda()
+            with torch.inference_mode():
+                depth = model(inp).squeeze().cpu().numpy()
+            if depth.max() > 0:
+                depth = depth / depth.max()
+            return depth
+        except Exception as e2:
+            print(f"[DepthFlow] ⚠ torch.hub depth failed ({e2}), using luminance fallback")
+
+        # Fallback: luminance-based pseudo-depth (still renders, less 3D)
+        gray = np.mean(img_np.astype(np.float32), axis=2)
+        depth = 1.0 - (gray / max(gray.max(), 1.0))
+        return depth
 
 
 class VideoPreview:
