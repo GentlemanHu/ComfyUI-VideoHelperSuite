@@ -71,6 +71,10 @@ try:
         MovisBuildFXPreset,
         MovisChainFX,
         MovisBuildShader,
+        MovisBuildAudio,
+        MovisChainAudio,
+        MovisBatchAddVideoTracks,
+        MovisQuickBuildTimeline,
     )
     HAS_VIDEO_OPS = True
 except ImportError:
@@ -2208,6 +2212,10 @@ if HAS_CUSTOM_FEATURES:
             "VHS_MOVIS_BuildFXPreset": MovisBuildFXPreset,
             "VHS_MOVIS_ChainFX": MovisChainFX,
             "VHS_MOVIS_BuildShader": MovisBuildShader,
+            "VHS_MOVIS_BuildAudio": MovisBuildAudio,
+            "VHS_MOVIS_ChainAudio": MovisChainAudio,
+            "VHS_MOVIS_BatchAddVideoTracks": MovisBatchAddVideoTracks,
+            "VHS_MOVIS_QuickBuildTimeline": MovisQuickBuildTimeline,
         })
         NODE_DISPLAY_NAME_MAPPINGS.update({
             "VHS_MOVIS_CreateTimeline": "Movis Create Timeline 🎬🎥🅥🅗🅢",
@@ -2242,6 +2250,10 @@ if HAS_CUSTOM_FEATURES:
             "VHS_MOVIS_BuildFXPreset": "Movis Build FX Preset 🎬⚡🎥🅥🅗🅢",
             "VHS_MOVIS_ChainFX": "Movis Chain FX 🎬🔗🎥🅥🅗🅢",
             "VHS_MOVIS_BuildShader": "Movis Build Shader 🎬🧠🔧🎥🅥🅗🅢",
+            "VHS_MOVIS_BuildAudio": "Movis Build Audio 🎬🎵🎥🅥🅗🅢",
+            "VHS_MOVIS_ChainAudio": "Movis Chain Audio 🎬🔗🎶🎥🅥🅗🅢",
+            "VHS_MOVIS_BatchAddVideoTracks": "Movis Batch Add Video Tracks 🎬📦🎥🅥🅗🅢",
+            "VHS_MOVIS_QuickBuildTimeline": "Movis Quick Build Timeline 🎬⚡🔒🎥🅥🅗🅢",
         })
     except NameError:
         print("Movis nodes not available")
