@@ -1664,6 +1664,7 @@ if HAS_CUSTOM_FEATURES:
     class MovisAutoCaptionTimeline:
         def __init__(self) -> None:
             self.cp = None
+            self._has_audio_cache = {}
 
         def _resolve_if_valid(self, raw_path: str):
             p = str(raw_path or "").strip()
@@ -1687,7 +1688,7 @@ if HAS_CUSTOM_FEATURES:
                     return path
             return None
 
-        def _infer_audio_path_from_timeline(self, timeline):
+        def _infer_audio_track_path_from_timeline(self, timeline):
             if not isinstance(timeline, dict):
                 return None
 
@@ -1700,6 +1701,12 @@ if HAS_CUSTOM_FEATURES:
                     if path:
                         return path
 
+            return None
+
+        def _infer_bgm_path_from_timeline(self, timeline):
+            if not isinstance(timeline, dict):
+                return None
+
             bgm = timeline.get("bgm", {})
             if isinstance(bgm, dict):
                 path = self._resolve_if_valid(bgm.get("path", ""))
@@ -1707,6 +1714,49 @@ if HAS_CUSTOM_FEATURES:
                     return path
 
             return None
+
+        def _media_has_audio_stream(self, media_path: str) -> bool:
+            path = str(media_path or "").strip()
+            if not path:
+                return False
+            if path in self._has_audio_cache:
+                return self._has_audio_cache[path]
+
+            has_audio = False
+            try:
+                ffprobe_exe = getattr(self.cp, "ffprobe_exe", None)
+                if not ffprobe_exe:
+                    ffprobe_exe = "ffprobe"
+                probe_cmd = [
+                    ffprobe_exe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ]
+                ret = subprocess.run(probe_cmd, capture_output=True, text=True)
+                has_audio = ret.returncode == 0 and bool(str(ret.stdout or "").strip())
+            except Exception as e:
+                logger.warn(f"[MovisAutoCaptionTimeline] 音轨探测失败，按无音频处理: {path} | {e}")
+                has_audio = False
+
+            self._has_audio_cache[path] = has_audio
+            return has_audio
+
+        def _clip_can_use_source_audio(self, clip):
+            if not isinstance(clip, dict):
+                return False
+            if not bool(clip.get("use_source_audio", True)):
+                return False
+            cpath = str(clip.get("path") or "").strip()
+            if not cpath:
+                return False
+            return self._media_has_audio_stream(cpath)
 
         def _extract_video_clips(self, timeline):
             clips = []
@@ -1911,12 +1961,23 @@ if HAS_CUSTOM_FEATURES:
             explicit_video = self._resolve_if_valid(video_path)
             explicit_audio = self._resolve_if_valid(audio_path)
             inferred_video = self._infer_video_path_from_timeline(t)
-            inferred_audio = self._infer_audio_path_from_timeline(t)
+            inferred_track_audio = self._infer_audio_track_path_from_timeline(t)
+            inferred_bgm_audio = self._infer_bgm_path_from_timeline(t)
             video_clips = self._extract_video_clips(t)
             audio_tracks = self._extract_audio_tracks(t)
 
+            valid_audio_tracks = []
+            for tr in audio_tracks:
+                tpath = tr.get("path")
+                if tpath and self._media_has_audio_stream(tpath):
+                    valid_audio_tracks.append(tr)
+                elif tpath:
+                    logger.warn(f"[MovisAutoCaptionTimeline] audio_track#{tr.get('idx', -1)} 无音频流，已忽略: {tpath}")
+
+            clips_with_audio_source = [c for c in video_clips if self._clip_can_use_source_audio(c)]
+
             vpath = explicit_video or inferred_video
-            apath = explicit_audio or inferred_audio or vpath
+            apath = explicit_audio or inferred_track_audio or inferred_bgm_audio or vpath
 
             if explicit_video:
                 logger.info(f"[MovisAutoCaptionTimeline] 使用显式 video_path: {explicit_video}")
@@ -1927,8 +1988,10 @@ if HAS_CUSTOM_FEATURES:
 
             if explicit_audio:
                 logger.info(f"[MovisAutoCaptionTimeline] 使用显式 audio_path: {explicit_audio}")
-            elif inferred_audio:
-                logger.info(f"[MovisAutoCaptionTimeline] audio_path 为空，已从 timeline.audio_tracks/bgm 自动推断: {inferred_audio}")
+            elif inferred_track_audio:
+                logger.info(f"[MovisAutoCaptionTimeline] audio_path 为空，已从 timeline.audio_tracks 自动推断: {inferred_track_audio}")
+            elif inferred_bgm_audio:
+                logger.info(f"[MovisAutoCaptionTimeline] audio_path 为空，已从 timeline.bgm 自动推断: {inferred_bgm_audio}")
             elif vpath:
                 logger.info("[MovisAutoCaptionTimeline] audio_path 为空，且 timeline 无独立音频，回退使用视频音轨")
             else:
@@ -1977,10 +2040,13 @@ if HAS_CUSTOM_FEATURES:
                         default_opacity=default_opacity,
                     )
                 logger.info(f"[MovisAutoCaptionTimeline] 模式=显式全局音频，字幕条数={count}")
-            elif len(video_clips) > 0:
-                logger.info(f"[MovisAutoCaptionTimeline] 模式=智能多轨匹配，video_clips={len(video_clips)}, audio_tracks={len(audio_tracks)}")
+            elif len(video_clips) > 0 and len(valid_audio_tracks) > 0:
+                logger.info(
+                    f"[MovisAutoCaptionTimeline] 模式=智能多轨匹配，"
+                    f"video_clips={len(video_clips)}, audio_tracks={len(valid_audio_tracks)}"
+                )
                 for clip in video_clips:
-                    chosen_audio = self._pick_audio_for_clip(clip, audio_tracks, used_audio_idx)
+                    chosen_audio = self._pick_audio_for_clip(clip, valid_audio_tracks, used_audio_idx)
                     segs = []
                     source_start = 0.0
                     source_desc = ""
@@ -1990,12 +2056,15 @@ if HAS_CUSTOM_FEATURES:
                         segs = self._transcribe_cached(chosen_audio["path"], transcribe_cache)
                         source_start = float(chosen_audio.get("source_start", 0.0))
                         source_desc = f"audio_track#{chosen_audio['idx']}"
-                    elif clip.get("use_source_audio", True) and clip.get("path"):
+                    elif self._clip_can_use_source_audio(clip):
                         segs = self._transcribe_cached(clip.get("path"), transcribe_cache)
                         source_start = float(clip.get("source_start", 0.0))
                         source_desc = f"video_source#{clip['idx']}"
                     else:
-                        logger.warn(f"[MovisAutoCaptionTimeline] clip#{clip['idx']} 无匹配音频且禁用源音轨，跳过")
+                        logger.warn(
+                            f"[MovisAutoCaptionTimeline] clip#{clip['idx']} 无可用音频来源"
+                            f"（无匹配 audio_track，或源视频无音频流/禁用源音轨），跳过"
+                        )
                         continue
 
                     clip_added = 0
@@ -2016,6 +2085,53 @@ if HAS_CUSTOM_FEATURES:
                     count += clip_added
                     logger.info(
                         f"[MovisAutoCaptionTimeline] clip#{clip['idx']} matched={source_desc or 'none'} "
+                        f"window=({clip['start']:.3f},{clip['end']:.3f}) added={clip_added}"
+                    )
+            elif inferred_bgm_audio:
+                segs = self._transcribe_cached(inferred_bgm_audio, transcribe_cache)
+                for seg in segs:
+                    count += self._append_segment_text(
+                        t, seg,
+                        source_start=0.0,
+                        timeline_start=0.0,
+                        timeline_end=10**9,
+                        start_offset=start_offset,
+                        position_x=position_x,
+                        position_y=position_y,
+                        default_font_size=default_font_size,
+                        default_font_family=default_font_family,
+                        default_color=default_color,
+                        default_opacity=default_opacity,
+                    )
+                logger.info(f"[MovisAutoCaptionTimeline] 模式=BGM全局识别，字幕条数={count}")
+            elif len(video_clips) > 0:
+                logger.info(
+                    f"[MovisAutoCaptionTimeline] 模式=视频源音轨识别，"
+                    f"video_clips={len(video_clips)}, 可用源音轨clip={len(clips_with_audio_source)}"
+                )
+                for clip in video_clips:
+                    if not self._clip_can_use_source_audio(clip):
+                        logger.warn(f"[MovisAutoCaptionTimeline] clip#{clip['idx']} 源视频无音频流或已禁用源音轨，跳过")
+                        continue
+                    segs = self._transcribe_cached(clip.get("path"), transcribe_cache)
+                    clip_added = 0
+                    for seg in segs:
+                        clip_added += self._append_segment_text(
+                            t, seg,
+                            source_start=float(clip.get("source_start", 0.0)),
+                            timeline_start=float(clip["start"]),
+                            timeline_end=float(clip["end"]),
+                            start_offset=start_offset,
+                            position_x=position_x,
+                            position_y=position_y,
+                            default_font_size=default_font_size,
+                            default_font_family=default_font_family,
+                            default_color=default_color,
+                            default_opacity=default_opacity,
+                        )
+                    count += clip_added
+                    logger.info(
+                        f"[MovisAutoCaptionTimeline] clip#{clip['idx']} matched=video_source#{clip['idx']} "
                         f"window=({clip['start']:.3f},{clip['end']:.3f}) added={clip_added}"
                     )
             elif apath:
