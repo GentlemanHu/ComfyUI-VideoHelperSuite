@@ -1,5 +1,6 @@
 import copy
 import datetime
+import difflib
 import os
 import re
 import sys
@@ -13,50 +14,42 @@ def _is_truthy_env(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _is_linux_headless() -> bool:
+def configure_qt_runtime_for_movis() -> None:
+    """安全配置 Qt 运行时（仅在必要场景启用无头参数）。"""
     if not sys.platform.startswith("linux"):
-        return False
-    if _is_truthy_env("COMFYUI_FORCE_HEADLESS_QT"):
-        return True
-    has_display = any(
-        bool(str(os.environ.get(k, "")).strip()) for k in ("DISPLAY", "WAYLAND_DISPLAY", "MIR_SOCKET")
-    )
-    return not has_display
-
-
-def _configure_qt_runtime_for_headless() -> None:
-    """
-    在 Linux 无头环境下，为 Qt 相关库设置更稳健的默认运行参数。
-
-    目的：
-    1) 避免默认 xcb 平台插件在无 DISPLAY 环境初始化失败；
-    2) 避免被 OpenCV 自带 Qt 插件路径污染（常见于 cv2/qt/plugins）；
-    3) 不影响有头环境：仅在无头 Linux 或显式强制时生效。
-    """
-    if not _is_linux_headless():
         return
 
-    if not _is_truthy_env("COMFYUI_KEEP_QT_PLATFORM"):
-        current_platform = str(os.environ.get("QT_QPA_PLATFORM", "")).strip().lower()
-        if current_platform in {"", "xcb"}:
-            os.environ["QT_QPA_PLATFORM"] = str(
-                os.environ.get("COMFYUI_HEADLESS_QT_PLATFORM", "offscreen")
-            ).strip() or "offscreen"
+    force = _is_truthy_env("COMFYUI_FORCE_HEADLESS_QT")
+    has_display = any(
+        bool(str(os.environ.get(k, "")).strip())
+        for k in ("DISPLAY", "WAYLAND_DISPLAY", "MIR_SOCKET")
+    )
 
     plugin_path = str(os.environ.get("QT_QPA_PLATFORM_PLUGIN_PATH", ""))
     if "cv2/qt/plugins" in plugin_path.replace("\\", "/").lower():
         os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
 
+    if not force and has_display:
+        return
+
+    current_platform = str(os.environ.get("QT_QPA_PLATFORM", "")).strip().lower()
+    if current_platform in {"", "xcb"}:
+        os.environ["QT_QPA_PLATFORM"] = str(
+            os.environ.get("COMFYUI_HEADLESS_QT_PLATFORM", "offscreen")
+        ).strip() or "offscreen"
+
     os.environ.setdefault("QT_OPENGL", "software")
 
 
-_configure_qt_runtime_for_headless()
+configure_qt_runtime_for_movis()
 
 import movis as mv
 import numpy as np
 import torch
 from PIL import Image
 from PIL import ImageColor
+from PIL import ImageDraw
+from PIL import ImageFont
 from comfy.utils import ProgressBar
 from tqdm import tqdm
 
@@ -73,6 +66,228 @@ except Exception:
 
 def _now_stamp() -> str:
     return datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+
+
+_FONT_CACHE = None
+_STYLE_CACHE = {}
+_FONT_CACHE_VERSION = 0
+_TEXT_SUPPORTS_FONT_STYLE = None
+_COMMON_FONT_STYLES = ["Regular", "Bold", "Italic", "Bold Italic", "Light", "Medium", "SemiBold"]
+
+
+def get_movis_fonts(refresh: bool = False) -> list[str]:
+    global _FONT_CACHE, _FONT_CACHE_VERSION
+    if _FONT_CACHE is not None and not refresh:
+        return list(_FONT_CACHE)
+
+    configure_qt_runtime_for_movis()
+    try:
+        fonts = sorted(set(str(x).strip() for x in mv.layer.Text.available_fonts() if str(x).strip()))
+        if not fonts:
+            raise RuntimeError("movis returned empty font list")
+        _FONT_CACHE = fonts
+    except Exception as e:
+        print(f"[Movis Font] Failed to enumerate fonts via movis/Qt: {e}")
+        _FONT_CACHE = [
+            "Sans Serif",
+            "Arial",
+            "Helvetica",
+            "Noto Sans CJK SC",
+            "WenQuanYi Micro Hei",
+            "Microsoft YaHei",
+            "PingFang SC",
+            "Lemon",
+        ]
+
+    _FONT_CACHE_VERSION += 1
+    return list(_FONT_CACHE)
+
+
+def get_movis_font_cache_version() -> int:
+    return int(_FONT_CACHE_VERSION)
+
+
+def clear_movis_font_caches() -> None:
+    global _FONT_CACHE, _STYLE_CACHE
+    _FONT_CACHE = None
+    _STYLE_CACHE.clear()
+
+
+def get_movis_styles(font_family: str, refresh: bool = False) -> list[str]:
+    global _STYLE_CACHE
+    family = str(font_family or "").strip()
+    if not family:
+        return ["Regular"]
+    if (not refresh) and family in _STYLE_CACHE:
+        return list(_STYLE_CACHE[family])
+
+    configure_qt_runtime_for_movis()
+    try:
+        styles = sorted(set(str(x).strip() for x in mv.layer.Text.available_styles(family) if str(x).strip()))
+        if not styles:
+            styles = ["Regular"]
+    except Exception as e:
+        print(f"[Movis Font] Failed to enumerate styles for {family}: {e}")
+        styles = ["Regular"]
+    _STYLE_CACHE[family] = styles
+    return list(styles)
+
+
+def choose_default_font(fonts: list[str]) -> str:
+    preferred = [
+        "Lemon",
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Sans Serif",
+        "Arial",
+        "Helvetica",
+    ]
+    for name in preferred:
+        if name in fonts:
+            return name
+    return fonts[0] if fonts else "Sans Serif"
+
+
+def validate_font_family(font_family: str) -> str:
+    fonts = get_movis_fonts()
+    family = str(font_family or "").strip()
+    if family in fonts:
+        return family
+
+    default = choose_default_font(fonts)
+    close = difflib.get_close_matches(family, fonts, n=5)
+    print(
+        f"[Movis Font] Font not found: {family!r}. "
+        f"Close matches: {close}. Fallback: {default!r}"
+    )
+    return default
+
+
+def validate_font_style(font_family: str, font_style: str) -> str:
+    styles = get_movis_styles(font_family)
+    style = str(font_style or "").strip()
+    if style in styles:
+        return style
+
+    fallback = "Regular" if "Regular" in styles else (styles[0] if styles else "Regular")
+    print(
+        f"[Movis Font] Style not found: {style!r} for {font_family!r}. "
+        f"Available styles: {styles}. Fallback: {fallback!r}"
+    )
+    return fallback
+
+
+def _movis_text_supports_font_style() -> bool:
+    global _TEXT_SUPPORTS_FONT_STYLE
+    if _TEXT_SUPPORTS_FONT_STYLE is not None:
+        return bool(_TEXT_SUPPORTS_FONT_STYLE)
+    try:
+        import inspect
+        sig = inspect.signature(mv.layer.Text)
+        _TEXT_SUPPORTS_FONT_STYLE = "font_style" in sig.parameters
+    except Exception:
+        _TEXT_SUPPORTS_FONT_STYLE = False
+    return bool(_TEXT_SUPPORTS_FONT_STYLE)
+
+
+def _create_movis_text_layer(text: str, font_size: float, font_family: str, font_style: str, color: str, duration: float):
+    kwargs = {
+        "text": str(text),
+        "font_size": float(font_size),
+        "font_family": str(font_family),
+        "color": str(color),
+        "duration": float(duration),
+    }
+    if _movis_text_supports_font_style():
+        kwargs["font_style"] = str(font_style)
+    try:
+        return mv.layer.Text(**kwargs)
+    except TypeError:
+        kwargs.pop("font_style", None)
+        return mv.layer.Text(**kwargs)
+
+
+def _clamp_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+    return int(round(_safe_float(value, float(default), min_value=float(min_value), max_value=float(max_value))))
+
+
+def _safe_color_text(value: str, default: str) -> str:
+    try:
+        ImageColor.getcolor(str(value), "RGBA")
+        return str(value)
+    except Exception:
+        return str(default)
+
+
+def _find_font_file_for_preview(font_family: str) -> str | None:
+    family = str(font_family or "").strip()
+    if not family:
+        return None
+
+    if sys.platform.startswith("linux"):
+        try:
+            ret = subprocess.run(
+                ["fc-match", "-f", "%{file}", family],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            if ret.returncode == 0:
+                p = str(ret.stdout or "").strip()
+                if p and os.path.isfile(p):
+                    return p
+        except Exception:
+            pass
+
+    try:
+        from matplotlib import font_manager  # lazy import
+        p = font_manager.findfont(family, fallback_to_default=True)
+        if p and os.path.isfile(p):
+            return p
+    except Exception:
+        pass
+
+    candidates = []
+    if sys.platform == "win32":
+        candidates = ["C:/Windows/Fonts"]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/System/Library/Fonts",
+            "/Library/Fonts",
+            str((Path.home() / "Library/Fonts").resolve()),
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            str((Path.home() / ".fonts").resolve()),
+        ]
+
+    family_l = family.lower().replace(" ", "")
+    for base in candidates:
+        try:
+            if not os.path.isdir(base):
+                continue
+            for root, _dirs, files in os.walk(base):
+                for f in files:
+                    fl = f.lower()
+                    if not fl.endswith((".ttf", ".otf", ".ttc")):
+                        continue
+                    if family_l in fl.replace(" ", ""):
+                        p = os.path.join(root, f)
+                        if os.path.isfile(p):
+                            return p
+        except Exception:
+            continue
+
+    return None
+
+
+def _pil_to_comfy_image(img: Image.Image):
+    arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+    return torch.from_numpy(arr).unsqueeze(0)
 
 
 def _check_nvenc_available() -> bool:
@@ -2243,12 +2458,15 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
         pbar.update(1)
 
     for txt in timeline.get("text_tracks", []):
-        layer = mv.layer.Text(
-            text=str(txt["text"]),
+        safe_family = validate_font_family(str(txt.get("font_family", "Sans Serif")))
+        safe_style = validate_font_style(safe_family, str(txt.get("font_style", "Regular")))
+        layer = _create_movis_text_layer(
+            text=str(txt.get("text", "")),
             font_size=float(txt.get("font_size", 64)),
-            font_family=str(txt.get("font_family", "Sans Serif")),
+            font_family=safe_family,
+            font_style=safe_style,
             color=str(txt.get("color", "white")),
-            duration=float(txt["duration"]),
+            duration=float(txt.get("duration", 0.01)),
         )
         scene.add_layer(
             layer,
@@ -2907,6 +3125,8 @@ class MovisSetBGM:
 class MovisAddTextOverlay:
     @classmethod
     def INPUT_TYPES(cls):
+        fonts = get_movis_fonts()
+        default_font = choose_default_font(fonts)
         return {
             "required": {
                 "timeline": ("MOVIS_TIMELINE",),
@@ -2914,7 +3134,8 @@ class MovisAddTextOverlay:
                 "start": ("FLOAT", {"default": 0.0, "min": 0.0}),
                 "duration": ("FLOAT", {"default": 2.0, "min": 0.01}),
                 "font_size": ("FLOAT", {"default": 64.0, "min": 8.0, "max": 300.0}),
-                "font_family": ("STRING", {"default": "Sans Serif"}),
+                "font_family": (fonts, {"default": default_font}),
+                "font_style": (_COMMON_FONT_STYLES, {"default": "Regular"}),
                 "color": ("STRING", {"default": "white"}),
                 "position_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
                 "position_y": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0}),
@@ -2927,15 +3148,18 @@ class MovisAddTextOverlay:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
     FUNCTION = "add_text"
 
-    def add_text(self, timeline, text, start, duration, font_size, font_family, color, position_x, position_y, opacity):
+    def add_text(self, timeline, text, start, duration, font_size, font_family, font_style="Regular", color="white", position_x=0.5, position_y=0.9, opacity=1.0):
         t = _clone_timeline(timeline)
+        safe_family = validate_font_family(font_family)
+        safe_style = validate_font_style(safe_family, font_style)
         t["text_tracks"].append(
             {
                 "text": text,
                 "start": _safe_float(start, 0.0, min_value=0.0),
                 "duration": _safe_float(duration, 2.0, min_value=0.01),
                 "font_size": _safe_float(font_size, 64.0, min_value=8.0, max_value=300.0),
-                "font_family": font_family,
+                "font_family": safe_family,
+                "font_style": safe_style,
                 "color": color,
                 "position_x": _safe_float(position_x, 0.5),
                 "position_y": _safe_float(position_y, 0.9),
@@ -2943,6 +3167,140 @@ class MovisAddTextOverlay:
             }
         )
         return (t,)
+
+
+class MovisRefreshFonts:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "rebuild_system_font_cache": ("BOOLEAN", {"default": True}),
+                "clear_plugin_cache": ("BOOLEAN", {"default": True}),
+                "refresh_movis_cache": ("BOOLEAN", {"default": True}),
+                "output_limit": ("INT", {"default": 300, "min": 1, "max": 5000}),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "STRING", "INT")
+    RETURN_NAMES = ("font_count", "fonts_text", "cache_version")
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "refresh"
+
+    def refresh(self, rebuild_system_font_cache, clear_plugin_cache, refresh_movis_cache, output_limit):
+        if bool(clear_plugin_cache):
+            clear_movis_font_caches()
+
+        if sys.platform.startswith("linux") and bool(rebuild_system_font_cache):
+            try:
+                subprocess.run(
+                    ["fc-cache", "-fv"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except Exception as e:
+                print(f"[Movis Font] fc-cache execution skipped/failed: {e}")
+
+        fonts = get_movis_fonts(refresh=bool(refresh_movis_cache))
+        limit = _clamp_int(output_limit, 300, 1, 5000)
+        text_items = fonts[:limit]
+        fonts_text = "\n".join(text_items)
+        if len(fonts) > limit:
+            fonts_text += f"\n... ({len(fonts) - limit} more fonts omitted)"
+        return (len(fonts), fonts_text, get_movis_font_cache_version())
+
+
+class MovisFontPreview:
+    @classmethod
+    def INPUT_TYPES(cls):
+        fonts = get_movis_fonts()
+        default_font = choose_default_font(fonts)
+        return {
+            "required": {
+                "text": ("STRING", {"default": "Lemon 字体预览 123 ABC", "multiline": True}),
+                "font_family": (fonts, {"default": default_font}),
+                "font_style": (_COMMON_FONT_STYLES, {"default": "Regular"}),
+                "font_size": ("INT", {"default": 64, "min": 8, "max": 512}),
+                "text_color": ("STRING", {"default": "#ffffff"}),
+                "bg_color": ("STRING", {"default": "#222222"}),
+                "width": ("INT", {"default": 768, "min": 64, "max": 4096}),
+                "height": ("INT", {"default": 200, "min": 64, "max": 2048}),
+                "x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "y": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
+                "align": (["left", "center", "right"], {"default": "center"}),
+                "stroke_width": ("INT", {"default": 0, "min": 0, "max": 128}),
+                "stroke_color": ("STRING", {"default": "#000000"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
+    FUNCTION = "preview"
+
+    def preview(self, text, font_family, font_style, font_size, text_color, bg_color, width, height, x, y, align, stroke_width, stroke_color):
+        safe_family = validate_font_family(font_family)
+        _safe_style = validate_font_style(safe_family, font_style)
+        safe_text_color = _safe_color_text(text_color, "#ffffff")
+        safe_bg_color = _safe_color_text(bg_color, "#222222")
+        safe_stroke_color = _safe_color_text(stroke_color, "#000000")
+
+        w = _clamp_int(width, 768, 64, 4096)
+        h = _clamp_int(height, 200, 64, 2048)
+        fs = _clamp_int(font_size, 64, 8, 512)
+        sw = _clamp_int(stroke_width, 0, 0, 128)
+        anchor_x = _safe_float(x, 0.5)
+        anchor_y = _safe_float(y, 0.5)
+        align = str(align or "center").strip().lower()
+        if align not in {"left", "center", "right"}:
+            align = "center"
+
+        font_path = _find_font_file_for_preview(safe_family)
+        if font_path:
+            try:
+                font = ImageFont.truetype(font_path, size=fs)
+            except Exception:
+                font = ImageFont.load_default()
+        else:
+            print(f"[Movis Font] Font preview fallback to default bitmap font: {safe_family!r}")
+            font = ImageFont.load_default()
+
+        image = Image.new("RGBA", (w, h), safe_bg_color)
+        draw = ImageDraw.Draw(image)
+        text_value = str(text or "")
+
+        bbox = draw.multiline_textbbox(
+            (0, 0),
+            text_value,
+            font=font,
+            align=align,
+            stroke_width=sw,
+            spacing=4,
+        )
+        text_w = max(1, int(bbox[2] - bbox[0]))
+        text_h = max(1, int(bbox[3] - bbox[1]))
+
+        px = _position_value_to_pixels(anchor_x, w)
+        py = _position_value_to_pixels(anchor_y, h)
+        if align == "left":
+            draw_x = px
+        elif align == "right":
+            draw_x = px - text_w
+        else:
+            draw_x = px - text_w * 0.5
+        draw_y = py - text_h * 0.5
+
+        draw.multiline_text(
+            (float(draw_x), float(draw_y)),
+            text_value,
+            font=font,
+            fill=safe_text_color,
+            align=align,
+            stroke_width=sw,
+            stroke_fill=safe_stroke_color,
+            spacing=4,
+        )
+        return (_pil_to_comfy_image(image.convert("RGB")),)
 
 
 class MovisRenderTimeline:

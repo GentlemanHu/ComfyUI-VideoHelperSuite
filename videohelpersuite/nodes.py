@@ -42,6 +42,11 @@ try:
     from .video_ops import (
         CompositeMedia,
         CompositeMultiVideo,
+        _COMMON_FONT_STYLES,
+        choose_default_font,
+        get_movis_fonts,
+        validate_font_family,
+        validate_font_style,
         MovisTimelinePro,
         MovisCreateTimeline,
         MovisAddVideoTrack,
@@ -76,6 +81,8 @@ try:
         MovisChainAudio,
         MovisBatchAddVideoTracks,
         MovisQuickBuildTimeline,
+        MovisRefreshFonts,
+        MovisFontPreview,
     )
     HAS_VIDEO_OPS = True
 except ImportError:
@@ -1595,12 +1602,15 @@ if HAS_CUSTOM_FEATURES:
     class MovisSubtitleFromSRT:
         @classmethod
         def INPUT_TYPES(cls):
+            fonts = get_movis_fonts()
+            default_font = choose_default_font(fonts)
             return {
                 "required": {
                     "timeline": ("MOVIS_TIMELINE",),
                     "srt_path": ("STRING", {"default": "", "tooltip": "SRT 文件路径"}),
                     "font_size": ("FLOAT", {"default": 54.0, "min": 8.0, "max": 300.0}),
-                    "font_family": ("STRING", {"default": "Sans Serif"}),
+                    "font_family": (fonts, {"default": default_font}),
+                    "font_style": (_COMMON_FONT_STYLES, {"default": "Regular"}),
                     "color": ("STRING", {"default": "white"}),
                     "position_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0}),
                     "position_y": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0}),
@@ -1615,9 +1625,11 @@ if HAS_CUSTOM_FEATURES:
         CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/movis"
         FUNCTION = "add_srt"
 
-        def add_srt(self, timeline, srt_path, font_size, font_family, color, position_x, position_y, opacity, start_offset, replace_existing):
+        def add_srt(self, timeline, srt_path, font_size, font_family, font_style="Regular", color="white", position_x=0.5, position_y=0.9, opacity=1.0, start_offset=0.0, replace_existing=False):
             t = json.loads(json.dumps(timeline))
             real_srt = resolve_media_path(srt_path, must_exist=True)
+            safe_family = validate_font_family(font_family)
+            safe_style = validate_font_style(safe_family, font_style)
 
             content = None
             for enc in ("utf-8-sig", "utf-8", "gbk"):
@@ -1652,7 +1664,8 @@ if HAS_CUSTOM_FEATURES:
                         "start": max(0.0, st),
                         "duration": dur,
                         "font_size": float(font_size),
-                        "font_family": str(font_family),
+                        "font_family": str(safe_family),
+                        "font_style": str(safe_style),
                         "color": str(color),
                         "position_x": float(position_x),
                         "position_y": float(position_y),
@@ -2780,6 +2793,8 @@ if HAS_CUSTOM_FEATURES:
             "VHS_MOVIS_ChainAudio": MovisChainAudio,
             "VHS_MOVIS_BatchAddVideoTracks": MovisBatchAddVideoTracks,
             "VHS_MOVIS_QuickBuildTimeline": MovisQuickBuildTimeline,
+            "VHS_MOVIS_RefreshFonts": MovisRefreshFonts,
+            "VHS_MOVIS_FontPreview": MovisFontPreview,
         })
         NODE_DISPLAY_NAME_MAPPINGS.update({
             "VHS_MOVIS_CreateTimeline": "Movis Create Timeline 🎬🎥🅥🅗🅢",
@@ -2818,6 +2833,8 @@ if HAS_CUSTOM_FEATURES:
             "VHS_MOVIS_ChainAudio": "Movis Chain Audio 🎬🔗🎶🎥🅥🅗🅢",
             "VHS_MOVIS_BatchAddVideoTracks": "Movis Batch Add Video Tracks 🎬📦🎥🅥🅗🅢",
             "VHS_MOVIS_QuickBuildTimeline": "Movis Quick Build Timeline 🎬⚡🔒🎥🅥🅗🅢",
+            "VHS_MOVIS_RefreshFonts": "Movis Refresh Fonts 🔄🔤🎥🅥🅗🅢",
+            "VHS_MOVIS_FontPreview": "Movis Font Preview 🔤🖼️🎥🅥🅗🅢",
         })
     except NameError:
         print("Movis nodes not available")
