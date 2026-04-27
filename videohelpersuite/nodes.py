@@ -10,6 +10,7 @@ import subprocess
 import numpy as np
 import re
 import datetime
+import tempfile
 from typing import List
 import torch
 from PIL import Image, ExifTags
@@ -2027,6 +2028,85 @@ if HAS_CUSTOM_FEATURES:
                 cache[path] = []
                 return []
 
+        def _transcribe_window_cached(self, path, window_start, window_duration, cache):
+            """仅转写音频窗口，减少超长 BGM 的无效识别耗时。"""
+            if not path:
+                return []
+            ws = max(0.0, float(window_start or 0.0))
+            wd = max(0.0, float(window_duration or 0.0))
+            if wd <= 0.01:
+                return []
+            cache_key = f"{path}@@window:{ws:.3f}:{wd:.3f}"
+            if cache_key in cache:
+                return cache[cache_key]
+
+            ffmpeg_exe = getattr(self.cp, "ffmpeg_exe", None) or ffmpeg_path or "ffmpeg"
+            tmp_clip = None
+            try:
+                os.makedirs(folder_paths.get_temp_directory(), exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    prefix="vhs_caption_window_",
+                    suffix=".wav",
+                    dir=folder_paths.get_temp_directory(),
+                    delete=False,
+                ) as tf:
+                    tmp_clip = tf.name
+
+                cmd = [
+                    ffmpeg_exe,
+                    "-v",
+                    "error",
+                    "-ss",
+                    f"{ws:.3f}",
+                    "-t",
+                    f"{wd:.3f}",
+                    "-i",
+                    path,
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-y",
+                    tmp_clip,
+                ]
+                ret = subprocess.run(cmd, capture_output=True, text=True)
+                if ret.returncode != 0:
+                    raise RuntimeError((ret.stderr or ret.stdout or "ffmpeg clip failed").strip())
+
+                raw_segs = self._transcribe_cached(tmp_clip, cache)
+                shifted = []
+                for seg in raw_segs:
+                    if isinstance(seg, dict):
+                        out = dict(seg)
+                        out["start"] = float(out.get("start", 0.0)) + ws
+                        out["end"] = float(out.get("end", out.get("start", 0.0))) + ws
+                        shifted.append(out)
+                    else:
+                        st = float(getattr(seg, "start", 0.0)) + ws
+                        et = float(getattr(seg, "end", st)) + ws
+                        txt = str(getattr(seg, "text", ""))
+                        shifted.append({"start": st, "end": et, "text": txt})
+
+                cache[cache_key] = shifted
+                logger.info(
+                    f"[MovisAutoCaptionTimeline] BGM窗口识别: start={ws:.3f}s dur={wd:.3f}s segments={len(shifted)}"
+                )
+                return shifted
+            except Exception as e:
+                logger.warn(f"[MovisAutoCaptionTimeline] BGM窗口识别失败，回退全量识别: {e}")
+                segs = self._transcribe_cached(path, cache)
+                cache[cache_key] = segs
+                return segs
+            finally:
+                try:
+                    if tmp_clip and os.path.exists(tmp_clip):
+                        os.remove(tmp_clip)
+                except Exception:
+                    pass
+
         def auto_caption(
             self,
             timeline,
@@ -2065,6 +2145,7 @@ if HAS_CUSTOM_FEATURES:
             visible_start, visible_end = self._timeline_visible_window(video_clips, audio_tracks)
             bgm_meta = t.get("bgm") if isinstance(t.get("bgm"), dict) else {}
             bgm_source_start = float(bgm_meta.get("source_start", 0.0) or 0.0)
+            bgm_trim_to_video_length = bool(bgm_meta.get("trim_to_video_length", True))
 
             valid_audio_tracks = []
             for tr in audio_tracks:
@@ -2280,7 +2361,16 @@ if HAS_CUSTOM_FEATURES:
                         f"window=({tr['start']:.3f},{tr['end']:.3f}) added={tr_added}"
                     )
             elif allow_bgm and inferred_bgm_audio:
-                segs = self._transcribe_cached(inferred_bgm_audio, transcribe_cache)
+                window_duration = max(0.0, float(visible_end) - float(visible_start))
+                if bgm_trim_to_video_length and window_duration > 0.01 and window_duration < 10**8:
+                    segs = self._transcribe_window_cached(
+                        inferred_bgm_audio,
+                        window_start=bgm_source_start,
+                        window_duration=window_duration,
+                        cache=transcribe_cache,
+                    )
+                else:
+                    segs = self._transcribe_cached(inferred_bgm_audio, transcribe_cache)
                 for seg in segs:
                     count += self._append_segment_text(
                         t, seg,
