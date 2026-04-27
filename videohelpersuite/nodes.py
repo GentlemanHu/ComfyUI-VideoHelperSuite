@@ -1988,6 +1988,10 @@ if HAS_CUSTOM_FEATURES:
                     "auto_layout": ("BOOLEAN", {"default": True, "tooltip": "根据时间线尺寸与宽高比自动适配字幕字号与安全区；关闭后严格使用手动位置/字号"}),
                 },
                 "optional": {
+                    "layout_mode": (["auto_safe", "auto_bottom", "manual"], {"default": "auto_safe", "tooltip": "字幕布局策略：安全自适配/底部贴边自适配/完全手动"}),
+                    "audio_source_strategy": (["auto", "mixed_priority", "explicit_only", "audio_tracks_only", "bgm_only", "video_only"], {"default": "auto", "tooltip": "音频识别来源策略"}),
+                    "safe_margin_ratio": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.35, "step": 0.005, "tooltip": "字幕安全边距比例；0表示自动"}),
+                    "font_scale": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.01, "tooltip": "字幕字号缩放（相对样式字号）"}),
                     "caption_json_param": ("STRING", {"default": "", "multiline": True}),
                     "custom_override_json": ("STRING", {"default": "", "multiline": True}),
                 },
@@ -2036,6 +2040,10 @@ if HAS_CUSTOM_FEATURES:
             replace_existing,
             show_progress,
             auto_layout,
+            layout_mode="auto_safe",
+            audio_source_strategy="auto",
+            safe_margin_ratio=0.0,
+            font_scale=1.0,
             caption_json_param="",
             custom_override_json="",
         ):
@@ -2127,15 +2135,24 @@ if HAS_CUSTOM_FEATURES:
                 apath = override_audio
 
             override_audio_strategy = override_dict.get("audio_source_strategy", override_dict.get("audio_strategy", ""))
-            audio_source_strategy = self._normalize_audio_strategy(override_audio_strategy)
-            layout_mode = self._normalize_layout_mode(override_dict.get("layout_mode", ""), auto_layout)
+            input_audio_strategy = self._normalize_audio_strategy(audio_source_strategy)
+            audio_source_strategy = self._normalize_audio_strategy(override_audio_strategy) if str(override_audio_strategy).strip() else input_audio_strategy
+
+            input_layout_mode = self._normalize_layout_mode(layout_mode, auto_layout)
+            layout_mode = self._normalize_layout_mode(override_dict.get("layout_mode", ""), auto_layout) if str(override_dict.get("layout_mode", "")).strip() else input_layout_mode
             if "auto_layout" in override_dict:
                 try:
                     auto_layout = bool(override_dict.get("auto_layout"))
                 except Exception:
                     pass
-            safe_margin_ratio = self._safe_float(override_dict.get("safe_margin_ratio", None), None)
-            font_scale = self._safe_float(override_dict.get("font_scale", 1.0), 1.0)
+
+            safe_margin_ratio_input = self._safe_float(safe_margin_ratio, 0.0)
+            if safe_margin_ratio_input is not None and safe_margin_ratio_input <= 0.0:
+                safe_margin_ratio_input = None
+            safe_margin_ratio = self._safe_float(override_dict.get("safe_margin_ratio", safe_margin_ratio_input), safe_margin_ratio_input)
+
+            font_scale_input = self._safe_float(font_scale, 1.0)
+            font_scale = self._safe_float(override_dict.get("font_scale", font_scale_input), font_scale_input)
 
             override_px = self._safe_float(override_dict.get("position_x", None), None)
             override_py = self._safe_float(override_dict.get("position_y", None), None)
