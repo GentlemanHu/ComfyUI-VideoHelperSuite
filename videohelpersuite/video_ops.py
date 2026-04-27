@@ -422,6 +422,13 @@ def _timeline_content_duration(timeline: dict[str, Any]) -> float:
     return max(end_points)
 
 
+def _timeline_video_duration(timeline: dict[str, Any]) -> float:
+    end_points = [0.0]
+    for clip in timeline.get("video_tracks", []):
+        end_points.append(float(clip.get("start", 0.0)) + float(clip.get("duration", 0.0)))
+    return max(end_points)
+
+
 def _resolve_video_clip_index(clips: list[dict[str, Any]], clip_index: int) -> int | None:
     if len(clips) == 0:
         return None
@@ -2028,8 +2035,10 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
     _bgm_meta = timeline.get("bgm") or {}
     _trim_bgm = bool(_bgm_meta.get("trim_to_video_length", True)) if _bgm_meta.get("path") else False
     if _trim_bgm:
-        _content_dur = _timeline_content_duration(timeline)
-        duration = _safe_float(_content_dur if _content_dur > 0.01 else _timeline_duration(timeline), 1.0, min_value=0.01)
+        # 语义：trim_to_video_length 应严格以“视频内容时长”为准，避免 BGM/字幕把时长拉长导致尾部黑屏。
+        _video_dur = _timeline_video_duration(timeline)
+        _fallback_dur = _timeline_content_duration(timeline)
+        duration = _safe_float(_video_dur if _video_dur > 0.01 else _fallback_dur, 1.0, min_value=0.01)
     else:
         duration = _safe_float(_timeline_duration(timeline), 1.0, min_value=0.01)
 
