@@ -1809,6 +1809,93 @@ if HAS_CUSTOM_FEATURES:
             tracks_out.sort(key=lambda x: (x["start"], x["idx"]))
             return tracks_out
 
+        def _timeline_visible_window(self, video_clips, audio_tracks):
+            """返回字幕可见时间窗（优先视频时间窗）。"""
+            if isinstance(video_clips, list) and len(video_clips) > 0:
+                s = min(float(c.get("start", 0.0)) for c in video_clips)
+                e = max(float(c.get("end", 0.0)) for c in video_clips)
+                if e - s > 0.01:
+                    return s, e
+            if isinstance(audio_tracks, list) and len(audio_tracks) > 0:
+                s = min(float(a.get("start", 0.0)) for a in audio_tracks)
+                e = max(float(a.get("end", 0.0)) for a in audio_tracks)
+                if e - s > 0.01:
+                    return s, e
+            return 0.0, 10**9
+
+        def _timeline_canvas_size(self, timeline):
+            canvas = timeline.get("canvas", {}) if isinstance(timeline, dict) else {}
+            try:
+                w = max(64.0, float(canvas.get("width", 1080) or 1080))
+                h = max(64.0, float(canvas.get("height", 1920) or 1920))
+            except Exception:
+                w, h = 1080.0, 1920.0
+            return w, h
+
+        def _adapt_caption_layout(self, timeline, position_x, position_y, font_size, auto_layout=True, layout_mode="auto_safe", safe_margin_ratio=None, font_scale=1.0):
+            """按画布尺寸/长宽比做字幕布局自适配，同时允许保留手工控制。"""
+            px = max(0.0, min(1.0, float(position_x)))
+            py = max(0.0, min(1.0, float(position_y)))
+            fs = max(8.0, float(font_size))
+            mode = str(layout_mode or "auto_safe").strip().lower()
+            if not bool(auto_layout) or mode == "manual":
+                return px, py, fs
+
+            cw, ch = self._timeline_canvas_size(timeline)
+            short_edge = max(1.0, min(cw, ch))
+            # 以 1080 短边为参考，自适配字体尺寸（默认“智能自动”）
+            scale = max(0.65, min(1.35, short_edge / 1080.0))
+            aspect = cw / max(1.0, ch)
+            # 极端宽屏场景下适当收小字幕，避免压画面
+            if aspect > 2.0:
+                scale *= max(0.78, 1.0 - (aspect - 2.0) * 0.08)
+            try:
+                scale *= max(0.5, min(2.0, float(font_scale)))
+            except Exception:
+                pass
+            fs = max(12.0, min(220.0, fs * scale))
+
+            # 根据字体像素高度推导安全边距，避免超宽/超窄时字幕出框
+            if safe_margin_ratio is None:
+                safe_band = max(0.04, min(0.22, (fs * 1.6) / max(64.0, ch)))
+            else:
+                try:
+                    safe_band = max(0.02, min(0.35, float(safe_margin_ratio)))
+                except Exception:
+                    safe_band = max(0.04, min(0.22, (fs * 1.6) / max(64.0, ch)))
+            # 当用户仍用默认底部位置（0.9）时，自动微调到底部安全区
+            if mode == "auto_bottom":
+                py = 1.0 - safe_band
+            elif abs(float(position_y) - 0.9) < 1e-6:
+                py = min(py, 1.0 - safe_band)
+            py = max(safe_band * 0.7, min(1.0 - safe_band, py))
+            return px, py, fs
+
+        def _normalize_audio_strategy(self, raw):
+            v = str(raw or "auto").strip().lower()
+            if v in {"auto", "mixed_priority", "explicit_only", "audio_tracks_only", "bgm_only", "video_only"}:
+                return v
+            return "auto"
+
+        def _normalize_layout_mode(self, raw, auto_layout):
+            if str(raw or "").strip() == "":
+                return "auto_safe" if bool(auto_layout) else "manual"
+            v = str(raw).strip().lower()
+            if v in {"auto_safe", "auto_bottom", "manual"}:
+                return v
+            return "auto_safe" if bool(auto_layout) else "manual"
+
+        def _safe_float(self, value, default=None):
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        def _override_resolved_path(self, override_dict, key):
+            if not isinstance(override_dict, dict):
+                return None
+            return self._resolve_if_valid(override_dict.get(key, ""))
+
         def _overlap(self, a_start: float, a_end: float, b_start: float, b_end: float) -> float:
             return max(0.0, min(a_end, b_end) - max(a_start, b_start))
 
@@ -1898,6 +1985,7 @@ if HAS_CUSTOM_FEATURES:
                     "sync_tolerance_ms": ("INT", {"default": 120, "min": 0, "max": 5000}),
                     "replace_existing": ("BOOLEAN", {"default": False}),
                     "show_progress": ("BOOLEAN", {"default": True}),
+                    "auto_layout": ("BOOLEAN", {"default": True, "tooltip": "根据时间线尺寸与宽高比自动适配字幕字号与安全区；关闭后严格使用手动位置/字号"}),
                 },
                 "optional": {
                     "caption_json_param": ("STRING", {"default": "", "multiline": True}),
@@ -1947,6 +2035,7 @@ if HAS_CUSTOM_FEATURES:
             sync_tolerance_ms,
             replace_existing,
             show_progress,
+            auto_layout,
             caption_json_param="",
             custom_override_json="",
         ):
@@ -1965,6 +2054,9 @@ if HAS_CUSTOM_FEATURES:
             inferred_bgm_audio = self._infer_bgm_path_from_timeline(t)
             video_clips = self._extract_video_clips(t)
             audio_tracks = self._extract_audio_tracks(t)
+            visible_start, visible_end = self._timeline_visible_window(video_clips, audio_tracks)
+            bgm_meta = t.get("bgm") if isinstance(t.get("bgm"), dict) else {}
+            bgm_source_start = float(bgm_meta.get("source_start", 0.0) or 0.0)
 
             valid_audio_tracks = []
             for tr in audio_tracks:
@@ -2002,8 +2094,13 @@ if HAS_CUSTOM_FEATURES:
             style = CaptionStylePreset._preset_dict(style_preset, True)
             if str(caption_json_param or "").strip():
                 style.update(self.cp.parse_caption_params(caption_json_param))
+            override_dict = {}
             if str(custom_override_json or "").strip():
-                style.update(self.cp.parse_caption_params(custom_override_json))
+                maybe_dict = self.cp.parse_caption_params(custom_override_json)
+                if isinstance(maybe_dict, dict):
+                    override_dict = dict(maybe_dict)
+                    # 覆盖优先级最高（默认空字符串则不生效）
+                    style.update(override_dict)
             if pbar is not None:
                 pbar.update(1)
 
@@ -2021,9 +2118,61 @@ if HAS_CUSTOM_FEATURES:
             default_color = str(style.get("highlight_color", "white"))
             default_opacity = 1.0
 
+            override_video = self._override_resolved_path(override_dict, "force_video_path")
+            override_audio = self._override_resolved_path(override_dict, "force_audio_path")
+            if override_video:
+                vpath = override_video
+            if override_audio:
+                explicit_audio = override_audio
+                apath = override_audio
+
+            override_audio_strategy = override_dict.get("audio_source_strategy", override_dict.get("audio_strategy", ""))
+            audio_source_strategy = self._normalize_audio_strategy(override_audio_strategy)
+            layout_mode = self._normalize_layout_mode(override_dict.get("layout_mode", ""), auto_layout)
+            if "auto_layout" in override_dict:
+                try:
+                    auto_layout = bool(override_dict.get("auto_layout"))
+                except Exception:
+                    pass
+            safe_margin_ratio = self._safe_float(override_dict.get("safe_margin_ratio", None), None)
+            font_scale = self._safe_float(override_dict.get("font_scale", 1.0), 1.0)
+
+            override_px = self._safe_float(override_dict.get("position_x", None), None)
+            override_py = self._safe_float(override_dict.get("position_y", None), None)
+            override_fs = self._safe_float(override_dict.get("font_size", override_dict.get("Fontsize", None)), None)
+            if override_px is not None:
+                position_x = max(0.0, min(1.0, override_px))
+            if override_py is not None:
+                position_y = max(0.0, min(1.0, override_py))
+            if override_fs is not None:
+                default_font_size = max(8.0, override_fs)
+
+            layout_x, layout_y, layout_font_size = self._adapt_caption_layout(
+                t,
+                position_x,
+                position_y,
+                default_font_size,
+                auto_layout=auto_layout,
+                layout_mode=layout_mode,
+                safe_margin_ratio=safe_margin_ratio,
+                font_scale=font_scale,
+            )
+            logger.info(
+                f"[MovisAutoCaptionTimeline] 字幕布局: auto_layout={bool(auto_layout)} "
+                f"canvas={self._timeline_canvas_size(t)[0]:.0f}x{self._timeline_canvas_size(t)[1]:.0f} "
+                f"layout_mode={layout_mode} pos=({layout_x:.3f},{layout_y:.3f}) fontsize={layout_font_size:.1f}"
+            )
+            logger.info(f"[MovisAutoCaptionTimeline] 音频策略: {audio_source_strategy}")
+
             count = 0
             used_audio_idx = set()
-            if explicit_audio:
+            allow_explicit = audio_source_strategy in ("auto", "mixed_priority", "explicit_only")
+            allow_tracks = audio_source_strategy in ("auto", "mixed_priority", "audio_tracks_only")
+            allow_bgm = audio_source_strategy in ("auto", "mixed_priority", "bgm_only")
+            allow_video = audio_source_strategy in ("auto", "mixed_priority", "video_only")
+            allow_fallback = audio_source_strategy in ("auto", "mixed_priority")
+
+            if allow_explicit and explicit_audio:
                 segs = self._transcribe_cached(explicit_audio, transcribe_cache)
                 for seg in segs:
                     count += self._append_segment_text(
@@ -2032,15 +2181,15 @@ if HAS_CUSTOM_FEATURES:
                         timeline_start=0.0,
                         timeline_end=10**9,
                         start_offset=start_offset,
-                        position_x=position_x,
-                        position_y=position_y,
-                        default_font_size=default_font_size,
+                        position_x=layout_x,
+                        position_y=layout_y,
+                        default_font_size=layout_font_size,
                         default_font_family=default_font_family,
                         default_color=default_color,
                         default_opacity=default_opacity,
                     )
                 logger.info(f"[MovisAutoCaptionTimeline] 模式=显式全局音频，字幕条数={count}")
-            elif len(video_clips) > 0 and len(valid_audio_tracks) > 0:
+            elif allow_tracks and len(video_clips) > 0 and len(valid_audio_tracks) > 0:
                 logger.info(
                     f"[MovisAutoCaptionTimeline] 模式=智能多轨匹配，"
                     f"video_clips={len(video_clips)}, audio_tracks={len(valid_audio_tracks)}"
@@ -2075,9 +2224,9 @@ if HAS_CUSTOM_FEATURES:
                             timeline_start=float(clip["start"]),
                             timeline_end=float(clip["end"]),
                             start_offset=start_offset,
-                            position_x=position_x,
-                            position_y=position_y,
-                            default_font_size=default_font_size,
+                            position_x=layout_x,
+                            position_y=layout_y,
+                            default_font_size=layout_font_size,
                             default_font_family=default_font_family,
                             default_color=default_color,
                             default_opacity=default_opacity,
@@ -2087,24 +2236,53 @@ if HAS_CUSTOM_FEATURES:
                         f"[MovisAutoCaptionTimeline] clip#{clip['idx']} matched={source_desc or 'none'} "
                         f"window=({clip['start']:.3f},{clip['end']:.3f}) added={clip_added}"
                     )
-            elif inferred_bgm_audio:
+            elif allow_tracks and len(valid_audio_tracks) > 0:
+                logger.info(
+                    f"[MovisAutoCaptionTimeline] 模式=音轨全局识别，audio_tracks={len(valid_audio_tracks)}"
+                )
+                for tr in valid_audio_tracks:
+                    segs = self._transcribe_cached(tr["path"], transcribe_cache)
+                    tr_added = 0
+                    for seg in segs:
+                        tr_added += self._append_segment_text(
+                            t, seg,
+                            source_start=float(tr.get("source_start", 0.0)),
+                            timeline_start=float(tr["start"]),
+                            timeline_end=float(tr["end"]),
+                            start_offset=start_offset,
+                            position_x=layout_x,
+                            position_y=layout_y,
+                            default_font_size=layout_font_size,
+                            default_font_family=default_font_family,
+                            default_color=default_color,
+                            default_opacity=default_opacity,
+                        )
+                    count += tr_added
+                    logger.info(
+                        f"[MovisAutoCaptionTimeline] audio_track#{tr['idx']} "
+                        f"window=({tr['start']:.3f},{tr['end']:.3f}) added={tr_added}"
+                    )
+            elif allow_bgm and inferred_bgm_audio:
                 segs = self._transcribe_cached(inferred_bgm_audio, transcribe_cache)
                 for seg in segs:
                     count += self._append_segment_text(
                         t, seg,
-                        source_start=0.0,
-                        timeline_start=0.0,
-                        timeline_end=10**9,
+                        source_start=bgm_source_start,
+                        timeline_start=visible_start,
+                        timeline_end=visible_end,
                         start_offset=start_offset,
-                        position_x=position_x,
-                        position_y=position_y,
-                        default_font_size=default_font_size,
+                        position_x=layout_x,
+                        position_y=layout_y,
+                        default_font_size=layout_font_size,
                         default_font_family=default_font_family,
                         default_color=default_color,
                         default_opacity=default_opacity,
                     )
-                logger.info(f"[MovisAutoCaptionTimeline] 模式=BGM全局识别，字幕条数={count}")
-            elif len(video_clips) > 0:
+                logger.info(
+                    f"[MovisAutoCaptionTimeline] 模式=BGM全局识别，字幕条数={count}, "
+                    f"source_start={bgm_source_start:.3f}, window=({visible_start:.3f},{visible_end:.3f})"
+                )
+            elif allow_video and len(video_clips) > 0:
                 logger.info(
                     f"[MovisAutoCaptionTimeline] 模式=视频源音轨识别，"
                     f"video_clips={len(video_clips)}, 可用源音轨clip={len(clips_with_audio_source)}"
@@ -2122,9 +2300,9 @@ if HAS_CUSTOM_FEATURES:
                             timeline_start=float(clip["start"]),
                             timeline_end=float(clip["end"]),
                             start_offset=start_offset,
-                            position_x=position_x,
-                            position_y=position_y,
-                            default_font_size=default_font_size,
+                            position_x=layout_x,
+                            position_y=layout_y,
+                            default_font_size=layout_font_size,
                             default_font_family=default_font_family,
                             default_color=default_color,
                             default_opacity=default_opacity,
@@ -2134,7 +2312,7 @@ if HAS_CUSTOM_FEATURES:
                         f"[MovisAutoCaptionTimeline] clip#{clip['idx']} matched=video_source#{clip['idx']} "
                         f"window=({clip['start']:.3f},{clip['end']:.3f}) added={clip_added}"
                     )
-            elif apath:
+            elif allow_fallback and apath:
                 segs = self._transcribe_cached(apath, transcribe_cache)
                 for seg in segs:
                     count += self._append_segment_text(
@@ -2143,9 +2321,9 @@ if HAS_CUSTOM_FEATURES:
                         timeline_start=0.0,
                         timeline_end=10**9,
                         start_offset=start_offset,
-                        position_x=position_x,
-                        position_y=position_y,
-                        default_font_size=default_font_size,
+                        position_x=layout_x,
+                        position_y=layout_y,
+                        default_font_size=layout_font_size,
                         default_font_family=default_font_family,
                         default_color=default_color,
                         default_opacity=default_opacity,
