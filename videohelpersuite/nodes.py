@@ -1666,6 +1666,101 @@ if HAS_CUSTOM_FEATURES:
         def __init__(self) -> None:
             self.cp = None
             self._has_audio_cache = {}
+            self._font_name_cache = None
+
+        def _extract_segment_text(self, seg):
+            try:
+                if isinstance(seg, dict):
+                    return str(seg.get("text", "")).strip()
+                return str(getattr(seg, "text", "")).strip()
+            except Exception:
+                return ""
+
+        def _contains_cjk(self, text: str) -> bool:
+            if not text:
+                return False
+            # CJK Unified Ideographs + Extension A + Compatibility Ideographs
+            return bool(re.search(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]", text))
+
+        def _list_available_font_names(self):
+            if isinstance(self._font_name_cache, set):
+                return self._font_name_cache
+
+            names = set()
+            # 优先走 movis(Qt) 字体列表，和最终渲染一致。
+            try:
+                import movis as _mv  # type: ignore
+                families = _mv.layer.Text.available_fonts()
+                if isinstance(families, (list, tuple)):
+                    for n in families:
+                        s = str(n).strip()
+                        if s:
+                            names.add(s)
+            except Exception:
+                pass
+
+            # Linux/Colab 常见环境补充：fontconfig
+            if not names:
+                try:
+                    ret = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True)
+                    if ret.returncode == 0:
+                        for line in str(ret.stdout or "").splitlines():
+                            for part in line.split(","):
+                                s = str(part).strip()
+                                if s:
+                                    names.add(s)
+                except Exception:
+                    pass
+
+            self._font_name_cache = names
+            return names
+
+        def _font_exists(self, family: str) -> bool:
+            fam = str(family or "").strip()
+            if not fam:
+                return False
+            names = self._list_available_font_names()
+            if not names:
+                # 无法探测时，不阻断用户显式指定字体
+                return True
+            if fam in names:
+                return True
+            fam_l = fam.lower()
+            return any(str(n).lower() == fam_l for n in names)
+
+        def _resolve_caption_font_family(self, text: str, preferred: str, force_font_family: str, auto_font_fallback: bool) -> str:
+            forced = str(force_font_family or "").strip()
+            if forced:
+                if self._font_exists(forced):
+                    return forced
+                logger.warn(f"[MovisAutoCaptionTimeline] 指定字体不可用，回退自动选择: {forced}")
+
+            preferred = str(preferred or "Sans Serif").strip() or "Sans Serif"
+            if not bool(auto_font_fallback):
+                return preferred
+            if not self._contains_cjk(text):
+                return preferred
+
+            if self._font_exists(preferred):
+                return preferred
+
+            cjk_candidates = [
+                "Noto Sans CJK SC",
+                "Noto Sans SC",
+                "Source Han Sans SC",
+                "Source Han Sans CN",
+                "Microsoft YaHei",
+                "PingFang SC",
+                "Hiragino Sans GB",
+                "WenQuanYi Zen Hei",
+                "SimHei",
+                "Arial Unicode MS",
+                "Sans Serif",
+            ]
+            for cand in cjk_candidates:
+                if self._font_exists(cand):
+                    return cand
+            return preferred
 
         def _resolve_if_valid(self, raw_path: str):
             p = str(raw_path or "").strip()
@@ -1931,7 +2026,7 @@ if HAS_CUSTOM_FEATURES:
                 return None
             return best
 
-        def _append_segment_text(self, t, seg, source_start, timeline_start, timeline_end, start_offset, position_x, position_y, default_font_size, default_font_family, default_color, default_opacity):
+        def _append_segment_text(self, t, seg, source_start, timeline_start, timeline_end, start_offset, position_x, position_y, default_font_size, default_font_family, default_color, default_opacity, force_font_family="", auto_font_fallback=True):
             if isinstance(seg, dict):
                 st = float(seg.get("start", 0.0))
                 et = float(seg.get("end", st + 0.01))
@@ -1954,13 +2049,20 @@ if HAS_CUSTOM_FEATURES:
             if out_et - out_st < 0.01:
                 return 0
 
+            seg_font_family = self._resolve_caption_font_family(
+                text=txt,
+                preferred=default_font_family,
+                force_font_family=force_font_family,
+                auto_font_fallback=bool(auto_font_fallback),
+            )
+
             t["text_tracks"].append(
                 {
                     "text": txt,
                     "start": max(0.0, out_st),
                     "duration": max(0.01, out_et - out_st),
                     "font_size": float(default_font_size),
-                    "font_family": str(default_font_family),
+                    "font_family": str(seg_font_family),
                     "color": str(default_color),
                     "position_x": float(position_x),
                     "position_y": float(position_y),
@@ -1991,6 +2093,8 @@ if HAS_CUSTOM_FEATURES:
                 "optional": {
                     "layout_mode": (["auto_safe", "auto_bottom", "manual"], {"default": "auto_safe", "tooltip": "字幕布局策略：安全自适配/底部贴边自适配/完全手动"}),
                     "audio_source_strategy": (["auto", "mixed_priority", "explicit_only", "audio_tracks_only", "bgm_only", "video_only"], {"default": "auto", "tooltip": "音频识别来源策略"}),
+                    "font_family": ("STRING", {"default": "", "tooltip": "可选：强制字幕字体；留空则走样式字体并自动中文回退"}),
+                    "auto_font_fallback": ("BOOLEAN", {"default": True, "tooltip": "自动检测中文字幕并切换到可用中文字体，避免方块字"}),
                     "safe_margin_ratio": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.35, "step": 0.005, "tooltip": "字幕安全边距比例；0表示自动"}),
                     "font_scale": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.01, "tooltip": "字幕字号缩放（相对样式字号）"}),
                     "caption_json_param": ("STRING", {"default": "", "multiline": True}),
@@ -2011,24 +2115,40 @@ if HAS_CUSTOM_FEATURES:
                 return transcribe_obj.get("segments")
             return []
 
-        def _transcribe_cached(self, path, cache):
+        def _transcribe_cached(self, path, cache, transcribe_kwargs=None):
             if not path:
                 return []
-            if path in cache:
-                return cache[path]
+            kwargs = transcribe_kwargs if isinstance(transcribe_kwargs, dict) else {}
+            kwargs_key = json.dumps(kwargs, ensure_ascii=False, sort_keys=True)
+            cache_key = f"{path}@@kw:{kwargs_key}"
+            if cache_key in cache:
+                return cache[cache_key]
             try:
                 self.cp._ensure_model()
-                transcribe = self.cp.model.transcribe(path, regroup=True, fp16=torch.cuda.is_available())
+                call_kwargs = {"regroup": True, "fp16": torch.cuda.is_available()}
+                call_kwargs.update(kwargs)
+                transcribe = self.cp.model.transcribe(path, **call_kwargs)
                 segs = self._extract_segments(transcribe)
-                cache[path] = segs
-                logger.info(f"[MovisAutoCaptionTimeline] 识别完成: {path} | segments={len(segs)}")
+                cache[cache_key] = segs
+                if len(segs) > 0:
+                    try:
+                        first_st = float(segs[0].get("start", 0.0)) if isinstance(segs[0], dict) else float(getattr(segs[0], "start", 0.0))
+                        last_et = float(segs[-1].get("end", first_st)) if isinstance(segs[-1], dict) else float(getattr(segs[-1], "end", first_st))
+                        logger.info(
+                            f"[MovisAutoCaptionTimeline] 识别完成: {path} | segments={len(segs)} | "
+                            f"first={first_st:.3f}s last={last_et:.3f}s"
+                        )
+                    except Exception:
+                        logger.info(f"[MovisAutoCaptionTimeline] 识别完成: {path} | segments={len(segs)}")
+                else:
+                    logger.info(f"[MovisAutoCaptionTimeline] 识别完成: {path} | segments=0")
                 return segs
             except Exception as e:
                 logger.warn(f"[MovisAutoCaptionTimeline] 识别失败，已跳过: {path} | {e}")
-                cache[path] = []
+                cache[cache_key] = []
                 return []
 
-        def _transcribe_window_cached(self, path, window_start, window_duration, cache):
+        def _transcribe_window_cached(self, path, window_start, window_duration, cache, transcribe_kwargs=None):
             """仅转写音频窗口，减少超长 BGM 的无效识别耗时。"""
             if not path:
                 return []
@@ -2076,7 +2196,7 @@ if HAS_CUSTOM_FEATURES:
                 if ret.returncode != 0:
                     raise RuntimeError((ret.stderr or ret.stdout or "ffmpeg clip failed").strip())
 
-                raw_segs = self._transcribe_cached(tmp_clip, cache)
+                raw_segs = self._transcribe_cached(tmp_clip, cache, transcribe_kwargs=transcribe_kwargs)
                 shifted = []
                 for seg in raw_segs:
                     if isinstance(seg, dict):
@@ -2097,7 +2217,7 @@ if HAS_CUSTOM_FEATURES:
                 return shifted
             except Exception as e:
                 logger.warn(f"[MovisAutoCaptionTimeline] BGM窗口识别失败，回退全量识别: {e}")
-                segs = self._transcribe_cached(path, cache)
+                segs = self._transcribe_cached(path, cache, transcribe_kwargs=transcribe_kwargs)
                 cache[cache_key] = segs
                 return segs
             finally:
@@ -2122,6 +2242,8 @@ if HAS_CUSTOM_FEATURES:
             auto_layout,
             layout_mode="auto_safe",
             audio_source_strategy="auto",
+            font_family="",
+            auto_font_fallback=True,
             safe_margin_ratio=0.0,
             font_scale=1.0,
             caption_json_param="",
@@ -2155,10 +2277,16 @@ if HAS_CUSTOM_FEATURES:
                 elif tpath:
                     logger.warn(f"[MovisAutoCaptionTimeline] audio_track#{tr.get('idx', -1)} 无音频流，已忽略: {tpath}")
 
+            first_valid_track_audio = valid_audio_tracks[0]["path"] if len(valid_audio_tracks) > 0 else None
+            bgm_has_audio = bool(inferred_bgm_audio and self._media_has_audio_stream(inferred_bgm_audio))
+            if inferred_bgm_audio and not bgm_has_audio:
+                logger.warn(f"[MovisAutoCaptionTimeline] bgm 无有效音频流，已忽略: {inferred_bgm_audio}")
+                inferred_bgm_audio = None
+
             clips_with_audio_source = [c for c in video_clips if self._clip_can_use_source_audio(c)]
 
             vpath = explicit_video or inferred_video
-            apath = explicit_audio or inferred_track_audio or inferred_bgm_audio or vpath
+            apath = explicit_audio or first_valid_track_audio or inferred_bgm_audio or vpath
 
             if explicit_video:
                 logger.info(f"[MovisAutoCaptionTimeline] 使用显式 video_path: {explicit_video}")
@@ -2219,6 +2347,28 @@ if HAS_CUSTOM_FEATURES:
             input_audio_strategy = self._normalize_audio_strategy(audio_source_strategy)
             audio_source_strategy = self._normalize_audio_strategy(override_audio_strategy) if str(override_audio_strategy).strip() else input_audio_strategy
 
+            force_font_family = str(font_family or "").strip()
+            if not force_font_family:
+                force_font_family = str(override_dict.get("font_family", override_dict.get("Fontname", "")) or "").strip()
+            if "auto_font_fallback" in override_dict:
+                auto_font_fallback = bool(override_dict.get("auto_font_fallback"))
+
+            transcribe_kwargs = {}
+            _no_speech = self._safe_float(override_dict.get("no_speech_threshold", override_dict.get("whisper_no_speech_threshold", None)), None)
+            if _no_speech is not None:
+                transcribe_kwargs["no_speech_threshold"] = max(0.0, min(1.0, float(_no_speech)))
+            _logprob = self._safe_float(override_dict.get("logprob_threshold", override_dict.get("whisper_logprob_threshold", None)), None)
+            if _logprob is not None:
+                transcribe_kwargs["logprob_threshold"] = float(_logprob)
+            _compress = self._safe_float(override_dict.get("compression_ratio_threshold", override_dict.get("whisper_compression_ratio_threshold", None)), None)
+            if _compress is not None:
+                transcribe_kwargs["compression_ratio_threshold"] = float(_compress)
+            if "condition_on_previous_text" in override_dict:
+                transcribe_kwargs["condition_on_previous_text"] = bool(override_dict.get("condition_on_previous_text"))
+
+            if len(transcribe_kwargs) > 0:
+                logger.info(f"[MovisAutoCaptionTimeline] ASR参数覆盖: {transcribe_kwargs}")
+
             input_layout_mode = self._normalize_layout_mode(layout_mode, auto_layout)
             layout_mode = self._normalize_layout_mode(override_dict.get("layout_mode", ""), auto_layout) if str(override_dict.get("layout_mode", "")).strip() else input_layout_mode
             if "auto_layout" in override_dict:
@@ -2271,7 +2421,7 @@ if HAS_CUSTOM_FEATURES:
             allow_fallback = audio_source_strategy in ("auto", "mixed_priority")
 
             if allow_explicit and explicit_audio:
-                segs = self._transcribe_cached(explicit_audio, transcribe_cache)
+                segs = self._transcribe_cached(explicit_audio, transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                 for seg in segs:
                     count += self._append_segment_text(
                         t, seg,
@@ -2285,6 +2435,8 @@ if HAS_CUSTOM_FEATURES:
                         default_font_family=default_font_family,
                         default_color=default_color,
                         default_opacity=default_opacity,
+                        force_font_family=force_font_family,
+                        auto_font_fallback=auto_font_fallback,
                     )
                 logger.info(f"[MovisAutoCaptionTimeline] 模式=显式全局音频，字幕条数={count}")
             elif allow_tracks and len(video_clips) > 0 and len(valid_audio_tracks) > 0:
@@ -2300,11 +2452,11 @@ if HAS_CUSTOM_FEATURES:
 
                     if chosen_audio is not None:
                         used_audio_idx.add(chosen_audio["idx"])
-                        segs = self._transcribe_cached(chosen_audio["path"], transcribe_cache)
+                        segs = self._transcribe_cached(chosen_audio["path"], transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                         source_start = float(chosen_audio.get("source_start", 0.0))
                         source_desc = f"audio_track#{chosen_audio['idx']}"
                     elif self._clip_can_use_source_audio(clip):
-                        segs = self._transcribe_cached(clip.get("path"), transcribe_cache)
+                        segs = self._transcribe_cached(clip.get("path"), transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                         source_start = float(clip.get("source_start", 0.0))
                         source_desc = f"video_source#{clip['idx']}"
                     else:
@@ -2328,6 +2480,8 @@ if HAS_CUSTOM_FEATURES:
                             default_font_family=default_font_family,
                             default_color=default_color,
                             default_opacity=default_opacity,
+                            force_font_family=force_font_family,
+                            auto_font_fallback=auto_font_fallback,
                         )
                     count += clip_added
                     logger.info(
@@ -2339,7 +2493,7 @@ if HAS_CUSTOM_FEATURES:
                     f"[MovisAutoCaptionTimeline] 模式=音轨全局识别，audio_tracks={len(valid_audio_tracks)}"
                 )
                 for tr in valid_audio_tracks:
-                    segs = self._transcribe_cached(tr["path"], transcribe_cache)
+                    segs = self._transcribe_cached(tr["path"], transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                     tr_added = 0
                     for seg in segs:
                         tr_added += self._append_segment_text(
@@ -2354,6 +2508,8 @@ if HAS_CUSTOM_FEATURES:
                             default_font_family=default_font_family,
                             default_color=default_color,
                             default_opacity=default_opacity,
+                            force_font_family=force_font_family,
+                            auto_font_fallback=auto_font_fallback,
                         )
                     count += tr_added
                     logger.info(
@@ -2368,9 +2524,10 @@ if HAS_CUSTOM_FEATURES:
                         window_start=bgm_source_start,
                         window_duration=window_duration,
                         cache=transcribe_cache,
+                        transcribe_kwargs=transcribe_kwargs,
                     )
                 else:
-                    segs = self._transcribe_cached(inferred_bgm_audio, transcribe_cache)
+                    segs = self._transcribe_cached(inferred_bgm_audio, transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                 for seg in segs:
                     count += self._append_segment_text(
                         t, seg,
@@ -2384,6 +2541,8 @@ if HAS_CUSTOM_FEATURES:
                         default_font_family=default_font_family,
                         default_color=default_color,
                         default_opacity=default_opacity,
+                            force_font_family=force_font_family,
+                            auto_font_fallback=auto_font_fallback,
                     )
                 logger.info(
                     f"[MovisAutoCaptionTimeline] 模式=BGM全局识别，字幕条数={count}, "
@@ -2398,7 +2557,7 @@ if HAS_CUSTOM_FEATURES:
                     if not self._clip_can_use_source_audio(clip):
                         logger.warn(f"[MovisAutoCaptionTimeline] clip#{clip['idx']} 源视频无音频流或已禁用源音轨，跳过")
                         continue
-                    segs = self._transcribe_cached(clip.get("path"), transcribe_cache)
+                    segs = self._transcribe_cached(clip.get("path"), transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                     clip_added = 0
                     for seg in segs:
                         clip_added += self._append_segment_text(
@@ -2413,6 +2572,8 @@ if HAS_CUSTOM_FEATURES:
                             default_font_family=default_font_family,
                             default_color=default_color,
                             default_opacity=default_opacity,
+                            force_font_family=force_font_family,
+                            auto_font_fallback=auto_font_fallback,
                         )
                     count += clip_added
                     logger.info(
@@ -2420,7 +2581,7 @@ if HAS_CUSTOM_FEATURES:
                         f"window=({clip['start']:.3f},{clip['end']:.3f}) added={clip_added}"
                     )
             elif allow_fallback and apath:
-                segs = self._transcribe_cached(apath, transcribe_cache)
+                segs = self._transcribe_cached(apath, transcribe_cache, transcribe_kwargs=transcribe_kwargs)
                 for seg in segs:
                     count += self._append_segment_text(
                         t, seg,
@@ -2434,6 +2595,8 @@ if HAS_CUSTOM_FEATURES:
                         default_font_family=default_font_family,
                         default_color=default_color,
                         default_opacity=default_opacity,
+                        force_font_family=force_font_family,
+                        auto_font_fallback=auto_font_fallback,
                     )
                 logger.info(f"[MovisAutoCaptionTimeline] 模式=回退单源识别，字幕条数={count}")
             else:
