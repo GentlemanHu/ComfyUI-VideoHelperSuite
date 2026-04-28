@@ -43,10 +43,13 @@ from .shaderflow_bridge import (
     DynamicNumber,
     SpectrogramEngine,
     TorchVisualizerRenderer,
+    PianoRollRenderer,
+    HeadlessGLSLRenderer,
     read_audio_file,
     get_audio_duration,
     write_frames_to_video,
     get_available_backend,
+    parse_midi_file,
 )
 
 
@@ -591,6 +594,478 @@ class ShaderFlowImageEffect:
 
 
 # ---------------------------------------------------------------------------
+# MIDI Piano Roll Node (Phase 2)
+# ---------------------------------------------------------------------------
+
+class ShaderFlowPianoRoll:
+    """MIDI piano roll visualization node.
+    Renders scrolling note blocks with piano keys.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "midi_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "MIDI文件路径(.mid/.midi)",
+                }),
+                "width": ("INT", {
+                    "default": 1920, "min": 320, "max": 7680, "step": 8,
+                }),
+                "height": ("INT", {
+                    "default": 1080, "min": 240, "max": 4320, "step": 8,
+                }),
+                "fps": ("FLOAT", {
+                    "default": 30.0, "min": 10.0, "max": 120.0, "step": 1.0,
+                }),
+                "roll_window": ("FLOAT", {
+                    "default": 3.0, "min": 0.5, "max": 10.0, "step": 0.1,
+                    "tooltip": "可视窗口时长(秒) | 决定音符滚动速度",
+                }),
+                "piano_height": ("FLOAT", {
+                    "default": 0.12, "min": 0.05, "max": 0.4, "step": 0.01,
+                    "tooltip": "钢琴键高度占比",
+                }),
+                "key_smooth_freq": ("FLOAT", {
+                    "default": 8.0, "min": 1.0, "max": 30.0, "step": 0.5,
+                    "tooltip": "琴键按压动画平滑频率",
+                }),
+                "key_smooth_zeta": ("FLOAT", {
+                    "default": 0.6, "min": 0.1, "max": 2.0, "step": 0.1,
+                    "tooltip": "琴键按压阻尼 | <1: 有弹跳效果",
+                }),
+            },
+            "optional": {
+                "audio_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "音频文件路径(可选)。如提供则合成到视频中",
+                }),
+                "output_format": (["mp4", "mkv", "webm"], {
+                    "default": "mp4",
+                }),
+                "output_frames": ("BOOLEAN", {
+                    "default": True,
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("video_path", "frames")
+    OUTPUT_NODE = True
+    FUNCTION = "generate_piano_roll"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow"
+
+    def generate_piano_roll(
+        self,
+        midi_path: str,
+        width: int = 1920,
+        height: int = 1080,
+        fps: float = 30.0,
+        roll_window: float = 3.0,
+        piano_height: float = 0.12,
+        key_smooth_freq: float = 8.0,
+        key_smooth_zeta: float = 0.6,
+        audio_path: str = "",
+        output_format: str = "mp4",
+        output_frames: bool = True,
+    ):
+        if not midi_path or not os.path.exists(midi_path):
+            raise FileNotFoundError(f"MIDI file not found: {midi_path}")
+
+        notes, duration, min_note, max_note = parse_midi_file(midi_path)
+        total_frames = int(math.ceil(duration * fps))
+        logger.info(f"[ShaderFlow] Piano roll: {len(notes)} notes, "
+                     f"{duration:.1f}s, {total_frames} frames")
+
+        renderer = PianoRollRenderer(width=width, height=height)
+        dt = 1.0 / fps
+
+        # Per-key dynamics for press animation
+        key_dynamics = [DynamicNumber(value=0.0, frequency=key_smooth_freq, zeta=key_smooth_zeta)
+                        for _ in range(128)]
+
+        pbar = ProgressBar(total_frames) if ProgressBar else None
+        frames = []
+
+        for fi in range(total_frames):
+            t = fi * dt
+
+            # Update per-key dynamics
+            key_vals = np.zeros(128, dtype=np.float32)
+            for n in notes:
+                if n["start"] <= t <= n["end"]:
+                    key_dynamics[n["note"]].target = np.array([float(n["velocity"])], dtype=np.float32)
+                else:
+                    # Only decay if not currently pressed
+                    if key_dynamics[n["note"]].target[0] > 0 and t > n["end"]:
+                        key_dynamics[n["note"]].target = np.array([0.0], dtype=np.float32)
+            for k in range(128):
+                key_dynamics[k].next(dt)
+                key_vals[k] = float(key_dynamics[k].value[0])
+
+            frame = renderer.render_frame(
+                time=t,
+                notes=notes,
+                roll_time=roll_window,
+                min_note=min_note,
+                max_note=max_note,
+                piano_height_ratio=piano_height,
+                key_dynamics=key_vals,
+            )
+            frames.append(frame)
+            if pbar:
+                pbar.update(1)
+
+        # Write video
+        out_dir = folder_paths.get_output_directory() if folder_paths else tempfile.gettempdir()
+        midi_hash = hashlib.md5(midi_path.encode()).hexdigest()[:8]
+        out_path = os.path.join(out_dir, f"shaderflow_piano_{midi_hash}.{output_format}")
+
+        codec_map = {"mp4": "libx264", "mkv": "libx264", "webm": "libvpx-vp9"}
+        audio_file = audio_path if audio_path and os.path.exists(audio_path) else None
+
+        write_frames_to_video(
+            frames=frames,
+            output_path=out_path,
+            fps=fps,
+            audio_path=audio_file,
+            codec=codec_map.get(output_format, "libx264"),
+        )
+        logger.info(f"[ShaderFlow] Piano roll video saved: {out_path}")
+
+        frames_tensor = None
+        if output_frames and HAS_TORCH:
+            arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
+            frames_tensor = torch.from_numpy(arr)
+        if frames_tensor is None:
+            frames_tensor = torch.zeros((1, height, width, 3), dtype=torch.float32) if HAS_TORCH else np.zeros((1, height, width, 3), dtype=np.float32)
+
+        return (out_path, frames_tensor)
+
+
+# ---------------------------------------------------------------------------
+# Custom GLSL Shader Node (Phase 3 - Route B with Route A fallback)
+# ---------------------------------------------------------------------------
+
+class ShaderFlowCustomGLSL:
+    """Run custom GLSL fragment shaders headlessly.
+    Route B (EGL/ModernGL) preferred, with procedural PyTorch fallback.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "fragment_shader": ("STRING", {
+                    "default": """#version 330
+uniform float iTime;
+uniform vec2 iResolution;
+in vec2 v_texcoord;
+out vec4 fragColor;
+void main() {
+    vec2 uv = v_texcoord;
+    vec3 col = 0.5 + 0.5*cos(iTime + uv.xyx + vec3(0,2,4));
+    fragColor = vec4(col, 1.0);
+}""",
+                    "multiline": True,
+                    "tooltip": "GLSL Fragment Shader代码。支持iTime/iResolution/iFrame uniforms。",
+                }),
+                "width": ("INT", {
+                    "default": 1920, "min": 320, "max": 7680, "step": 8,
+                }),
+                "height": ("INT", {
+                    "default": 1080, "min": 240, "max": 4320, "step": 8,
+                }),
+                "total_frames": ("INT", {
+                    "default": 120, "min": 1, "max": 100000,
+                }),
+                "fps": ("FLOAT", {
+                    "default": 30.0, "min": 1.0, "max": 120.0,
+                }),
+            },
+            "optional": {
+                "output_format": (["mp4", "mkv", "webm"], {
+                    "default": "mp4",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("video_path", "frames")
+    OUTPUT_NODE = True
+    FUNCTION = "render_glsl"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow"
+
+    def render_glsl(
+        self,
+        fragment_shader: str,
+        width: int = 1920,
+        height: int = 1080,
+        total_frames: int = 120,
+        fps: float = 30.0,
+        output_format: str = "mp4",
+    ):
+        dt = 1.0 / fps
+        frames = []
+        backend = get_available_backend()
+        used_glsl = False
+
+        # Route B: try headless GLSL
+        if backend == "shaderflow":
+            glsl = HeadlessGLSLRenderer(width=width, height=height)
+            if glsl.compile(fragment_shader):
+                used_glsl = True
+                pbar = ProgressBar(total_frames) if ProgressBar else None
+                for fi in range(total_frames):
+                    t = fi * dt
+                    result = glsl.render_frame(time=t, frame=fi, dt=dt)
+                    if result is not None:
+                        frames.append(result)
+                    else:
+                        used_glsl = False
+                        frames = []
+                        break
+                    if pbar:
+                        pbar.update(1)
+                glsl.release()
+
+        # Route A fallback: procedural rainbow
+        if not used_glsl:
+            logger.info("[ShaderFlow] GLSL not available, using PyTorch procedural fallback")
+            pbar = ProgressBar(total_frames) if ProgressBar else None
+            for fi in range(total_frames):
+                t = fi * dt
+                yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+                uv_x = xx / width
+                uv_y = yy / height
+                r = (0.5 + 0.5 * np.cos(t + uv_x * 6.28)) * 255
+                g = (0.5 + 0.5 * np.cos(t + uv_y * 6.28 + 2.0)) * 255
+                b = (0.5 + 0.5 * np.cos(t + (uv_x + uv_y) * 3.14 + 4.0)) * 255
+                frame = np.stack([r, g, b], axis=-1).astype(np.uint8)
+                frames.append(frame)
+                if pbar:
+                    pbar.update(1)
+
+        # Write video
+        out_dir = folder_paths.get_output_directory() if folder_paths else tempfile.gettempdir()
+        sh = hashlib.md5(fragment_shader.encode()).hexdigest()[:8]
+        out_path = os.path.join(out_dir, f"shaderflow_glsl_{sh}.{output_format}")
+        codec_map = {"mp4": "libx264", "mkv": "libx264", "webm": "libvpx-vp9"}
+        write_frames_to_video(frames=frames, output_path=out_path, fps=fps,
+                              codec=codec_map.get(output_format, "libx264"))
+
+        if HAS_TORCH:
+            arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
+            frames_tensor = torch.from_numpy(arr)
+        else:
+            frames_tensor = np.stack(frames, axis=0).astype(np.float32) / 255.0
+
+        return (out_path, frames_tensor)
+
+
+# ---------------------------------------------------------------------------
+# ShaderToy Compatible Node (Phase 3)
+# ---------------------------------------------------------------------------
+
+class ShaderFlowShaderToy:
+    """Run ShaderToy-compatible mainImage() shaders.
+    Automatically wraps ShaderToy code with proper uniforms.
+    Route B (EGL) preferred, Route A (PyTorch) fallback.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "shadertoy_code": ("STRING", {
+                    "default": """void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord / iResolution.xy;
+    float d = length(uv - 0.5);
+    vec3 col = 0.5 + 0.5*cos(iTime + uv.xyx*6.283 + vec3(0,2,4));
+    col *= smoothstep(0.5, 0.2, d);
+    fragColor = vec4(col, 1.0);
+}""",
+                    "multiline": True,
+                    "tooltip": "ShaderToy兼容代码。粘贴ShaderToy的mainImage函数即可。支持iTime/iResolution/iFrame/iTimeDelta/iMouse。",
+                }),
+                "width": ("INT", {
+                    "default": 1920, "min": 320, "max": 7680, "step": 8,
+                }),
+                "height": ("INT", {
+                    "default": 1080, "min": 240, "max": 4320, "step": 8,
+                }),
+                "total_frames": ("INT", {
+                    "default": 120, "min": 1, "max": 100000,
+                }),
+                "fps": ("FLOAT", {
+                    "default": 30.0, "min": 1.0, "max": 120.0,
+                }),
+            },
+            "optional": {
+                "output_format": (["mp4", "mkv", "webm"], {
+                    "default": "mp4",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("video_path", "frames")
+    OUTPUT_NODE = True
+    FUNCTION = "render_shadertoy"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow"
+
+    def render_shadertoy(
+        self,
+        shadertoy_code: str,
+        width: int = 1920,
+        height: int = 1080,
+        total_frames: int = 120,
+        fps: float = 30.0,
+        output_format: str = "mp4",
+    ):
+        # Wrap ShaderToy code into standalone fragment shader
+        fragment = HeadlessGLSLRenderer.wrap_shadertoy(shadertoy_code)
+
+        # Reuse the CustomGLSL node logic
+        glsl_node = ShaderFlowCustomGLSL()
+        return glsl_node.render_glsl(
+            fragment_shader=fragment,
+            width=width,
+            height=height,
+            total_frames=total_frames,
+            fps=fps,
+            output_format=output_format,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Motion Blur Node (Phase 3 - ShaderFX port)
+# ---------------------------------------------------------------------------
+
+class ShaderFlowMotionBlur:
+    """Per-frame motion blur via frame accumulation."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {
+                    "tooltip": "输入图像序列",
+                }),
+                "strength": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 0.95, "step": 0.05,
+                    "tooltip": "运动模糊强度 | 0=无模糊 | 0.3=轻度 | 0.7=重度",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "apply_motion_blur"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow"
+
+    def apply_motion_blur(self, images, strength: float = 0.3):
+        if not HAS_TORCH:
+            return (images,)
+
+        imgs = images.cpu().numpy() if isinstance(images, torch.Tensor) else np.asarray(images)
+        n = imgs.shape[0]
+        results = [imgs[0].copy()]
+        accum = imgs[0].copy()
+
+        for i in range(1, n):
+            accum = accum * strength + imgs[i] * (1.0 - strength)
+            results.append(accum.copy())
+
+        out = np.stack(results, axis=0).astype(np.float32)
+        return (torch.from_numpy(out),)
+
+
+# ---------------------------------------------------------------------------
+# Color Grading Node (Phase 3 - ShaderFX port)
+# ---------------------------------------------------------------------------
+
+class ShaderFlowColorGrade:
+    """Cinema-style color grading."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {}),
+                "temperature": ("FLOAT", {
+                    "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "色温 | <0: 冷色调 | >0: 暖色调",
+                }),
+                "tint": ("FLOAT", {
+                    "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "色调 | <0: 偏绿 | >0: 偏品红",
+                }),
+                "exposure": ("FLOAT", {
+                    "default": 0.0, "min": -3.0, "max": 3.0, "step": 0.1,
+                    "tooltip": "曝光补偿 EV",
+                }),
+                "contrast": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05,
+                    "tooltip": "对比度 | 1=原始",
+                }),
+                "saturation": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05,
+                    "tooltip": "饱和度 | 0=灰度 | 1=原始",
+                }),
+                "gamma": ("FLOAT", {
+                    "default": 1.0, "min": 0.1, "max": 3.0, "step": 0.05,
+                    "tooltip": "伽马 | <1: 提亮 | >1: 压暗",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "apply_color_grade"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow"
+
+    def apply_color_grade(
+        self, images, temperature=0.0, tint=0.0,
+        exposure=0.0, contrast=1.0, saturation=1.0, gamma=1.0,
+    ):
+        if not HAS_TORCH:
+            return (images,)
+
+        imgs = images.cpu().numpy() if isinstance(images, torch.Tensor) else np.asarray(images)
+        result = imgs.copy().astype(np.float32)
+
+        # Exposure
+        if exposure != 0.0:
+            result = result * (2.0 ** exposure)
+
+        # Temperature & tint (simplified)
+        if temperature != 0.0 or tint != 0.0:
+            result[:, :, :, 0] = result[:, :, :, 0] + temperature * 0.1  # R
+            result[:, :, :, 1] = result[:, :, :, 1] - tint * 0.05        # G
+            result[:, :, :, 2] = result[:, :, :, 2] - temperature * 0.1  # B
+
+        # Contrast
+        if contrast != 1.0:
+            result = (result - 0.5) * contrast + 0.5
+
+        # Saturation
+        if saturation != 1.0:
+            luma = 0.299 * result[:, :, :, 0] + 0.587 * result[:, :, :, 1] + 0.114 * result[:, :, :, 2]
+            luma = luma[:, :, :, np.newaxis]
+            result = luma + (result - luma) * saturation
+
+        # Gamma
+        if gamma != 1.0:
+            result = np.clip(result, 0, None)
+            result = result ** (1.0 / gamma)
+
+        result = np.clip(result, 0.0, 1.0).astype(np.float32)
+        return (torch.from_numpy(result),)
+
+
+# ---------------------------------------------------------------------------
 # Node Registration
 # ---------------------------------------------------------------------------
 
@@ -598,10 +1073,20 @@ NODE_CLASS_MAPPINGS = {
     "VHS_ShaderFlow_AudioVisualizer": ShaderFlowAudioVisualizer,
     "VHS_ShaderFlow_Dynamics": ShaderFlowDynamicsNode,
     "VHS_ShaderFlow_ImageEffect": ShaderFlowImageEffect,
+    "VHS_ShaderFlow_PianoRoll": ShaderFlowPianoRoll,
+    "VHS_ShaderFlow_CustomGLSL": ShaderFlowCustomGLSL,
+    "VHS_ShaderFlow_ShaderToy": ShaderFlowShaderToy,
+    "VHS_ShaderFlow_MotionBlur": ShaderFlowMotionBlur,
+    "VHS_ShaderFlow_ColorGrade": ShaderFlowColorGrade,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_ShaderFlow_AudioVisualizer": "ShaderFlow Audio Visualizer 🎵🌊🎥🅥🅗🅢",
     "VHS_ShaderFlow_Dynamics": "ShaderFlow Dynamics (2nd Order) 🌊🎥🅥🅗🅢",
     "VHS_ShaderFlow_ImageEffect": "ShaderFlow Image Effect 🌊✨🎥🅥🅗🅢",
+    "VHS_ShaderFlow_PianoRoll": "ShaderFlow Piano Roll 🎹🌊🎥🅥🅗🅢",
+    "VHS_ShaderFlow_CustomGLSL": "ShaderFlow Custom GLSL 🔧🌊🎥🅥🅗🅢",
+    "VHS_ShaderFlow_ShaderToy": "ShaderFlow ShaderToy 🎮🌊🎥🅥🅗🅢",
+    "VHS_ShaderFlow_MotionBlur": "ShaderFlow Motion Blur 💨🌊🎥🅥🅗🅢",
+    "VHS_ShaderFlow_ColorGrade": "ShaderFlow Color Grade 🎨🌊🎥🅥🅗🅢",
 }

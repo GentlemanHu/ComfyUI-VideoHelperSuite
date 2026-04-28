@@ -551,3 +551,337 @@ def write_frames_to_video(
         subprocess.run(mux_cmd, check=True, timeout=120)
         os.remove(tmp_video)
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# MIDI Piano Roll Renderer (Phase 2)
+# ---------------------------------------------------------------------------
+
+class PianoRollRenderer:
+    """Render MIDI piano roll visualization without OpenGL."""
+
+    # Piano key color mapping (True = black key)
+    BLACK_KEYS = {1, 3, 6, 8, 10}  # C#, D#, F#, G#, A#
+
+    def __init__(self, width: int = 1920, height: int = 1080):
+        self.width = width
+        self.height = height
+
+    @staticmethod
+    def is_black_key(note: int) -> bool:
+        return (note % 12) in PianoRollRenderer.BLACK_KEYS
+
+    def render_frame(
+        self,
+        time: float,
+        notes: List[Dict],
+        roll_time: float = 3.0,
+        min_note: int = 21,
+        max_note: int = 108,
+        piano_height_ratio: float = 0.15,
+        key_dynamics: Optional[np.ndarray] = None,
+        bg_color: Tuple[int, int, int] = (12, 12, 20),
+        channel_colors: Optional[List[Tuple[int, int, int]]] = None,
+    ) -> np.ndarray:
+        """Render one piano roll frame.
+        Args:
+            time: current playback time in seconds
+            notes: list of dicts with keys: note, start, end, channel, velocity
+            roll_time: seconds visible in the rolling area
+            min_note/max_note: MIDI note range
+            piano_height_ratio: fraction of screen height for piano keys
+            key_dynamics: per-key velocity array (from DynamicNumber)
+        """
+        try:
+            import cv2
+        except ImportError:
+            return np.full((self.height, self.width, 3), bg_color, dtype=np.uint8)
+
+        if channel_colors is None:
+            channel_colors = [
+                (0, 200, 255), (255, 100, 50), (100, 255, 80), (255, 200, 0),
+                (200, 80, 255), (255, 80, 180), (80, 255, 200), (255, 150, 100),
+                (100, 150, 255), (200, 255, 80), (255, 80, 80), (80, 200, 200),
+                (180, 120, 255), (255, 220, 100), (100, 255, 255), (220, 180, 255),
+            ]
+
+        frame = np.full((self.height, self.width, 3), bg_color, dtype=np.uint8)
+        note_range = max(1, max_note - min_note + 1)
+        piano_h = int(self.height * piano_height_ratio)
+        roll_h = self.height - piano_h
+        key_w = self.width / note_range
+
+        # Draw rolling notes
+        for n in notes:
+            nn = n["note"]
+            if nn < min_note or nn > max_note:
+                continue
+            ns, ne = n["start"], n["end"]
+            # Map time to y position: notes scroll downward
+            y_start = roll_h - int((ne - time) / roll_time * roll_h)
+            y_end = roll_h - int((ns - time) / roll_time * roll_h)
+            if y_end < 0 or y_start > roll_h:
+                continue
+            y_start = max(0, y_start)
+            y_end = min(roll_h, y_end)
+            x = int((nn - min_note) * key_w)
+            w = max(1, int(key_w) - 1)
+            ch = n.get("channel", 0) % len(channel_colors)
+            vel = n.get("velocity", 100) / 127.0
+            color = tuple(int(c * (0.4 + 0.6 * vel)) for c in channel_colors[ch])
+            cv2.rectangle(frame, (x, y_start), (x + w, y_end), color, -1)
+            # Bright edge
+            cv2.rectangle(frame, (x, y_start), (x + w, min(y_start + 2, y_end)),
+                          tuple(min(255, c + 60) for c in color), -1)
+
+        # Draw separator line
+        cv2.line(frame, (0, roll_h), (self.width, roll_h), (60, 60, 80), 1)
+
+        # Draw piano keys
+        for i in range(note_range):
+            note_num = min_note + i
+            x = int(i * key_w)
+            w = max(1, int(key_w))
+            is_black = self.is_black_key(note_num)
+
+            # Base key color
+            if is_black:
+                kc = (30, 30, 35)
+            else:
+                kc = (200, 200, 210)
+
+            # Highlight pressed keys
+            if key_dynamics is not None and note_num < len(key_dynamics):
+                vel = float(key_dynamics[note_num])
+                if vel > 0.01:
+                    ch_idx = 0
+                    # Find which channel is playing this note
+                    for n in notes:
+                        if n["note"] == note_num and n["start"] <= time <= n["end"]:
+                            ch_idx = n.get("channel", 0) % len(channel_colors)
+                            break
+                    press_color = channel_colors[ch_idx]
+                    blend = min(1.0, vel / 80.0)
+                    kc = tuple(int(kc[c] * (1 - blend) + press_color[c] * blend) for c in range(3))
+
+            y0 = roll_h
+            y1 = roll_h + piano_h
+            if is_black:
+                bh = int(piano_h * 0.6)
+                cv2.rectangle(frame, (x, y0), (x + w, y0 + bh), kc, -1)
+            else:
+                cv2.rectangle(frame, (x, y0), (x + w, y1), kc, -1)
+                cv2.rectangle(frame, (x, y0), (x + w, y1), (40, 40, 50), 1)
+
+        # Glow pass
+        blurred = cv2.GaussianBlur(frame[:roll_h], (0, 0), sigmaX=10)
+        frame[:roll_h] = np.clip(
+            frame[:roll_h].astype(np.float32) + blurred.astype(np.float32) * 0.25,
+            0, 255
+        ).astype(np.uint8)
+
+        return frame
+
+
+def parse_midi_file(path: str) -> Tuple[List[Dict], float, int, int]:
+    """Parse MIDI file, returns (notes, duration, min_note, max_note).
+    Each note: {note, start, end, channel, velocity}
+    """
+    try:
+        import pretty_midi
+    except ImportError:
+        raise ImportError("pretty_midi is required for MIDI piano roll. Install: pip install pretty_midi")
+
+    midi = pretty_midi.PrettyMIDI(str(path))
+    notes = []
+    min_n, max_n = 128, 0
+    for ch_idx, instrument in enumerate(midi.instruments):
+        for note in instrument.notes:
+            notes.append({
+                "note": note.pitch,
+                "start": note.start,
+                "end": note.end,
+                "channel": ch_idx,
+                "velocity": note.velocity,
+            })
+            min_n = min(min_n, note.pitch)
+            max_n = max(max_n, note.pitch)
+    duration = midi.get_end_time()
+    # Add margin
+    min_n = max(0, min_n - 3)
+    max_n = min(127, max_n + 3)
+    return notes, duration, min_n, max_n
+
+
+# ---------------------------------------------------------------------------
+# Headless GLSL Renderer (Route B - Phase 3)
+# ---------------------------------------------------------------------------
+
+class HeadlessGLSLRenderer:
+    """Run GLSL fragment shaders via ModernGL headless context.
+    Route B: requires EGL or standalone OpenGL context.
+    """
+
+    VERTEX_SHADER = """
+    #version 330
+    in vec2 in_position;
+    in vec2 in_texcoord;
+    out vec2 v_texcoord;
+    void main() {
+        gl_Position = vec4(in_position, 0.0, 1.0);
+        v_texcoord = in_texcoord;
+    }
+    """
+
+    DEFAULT_FRAGMENT = """
+    #version 330
+    uniform float iTime;
+    uniform vec2 iResolution;
+    uniform int iFrame;
+    in vec2 v_texcoord;
+    out vec4 fragColor;
+    void main() {
+        vec2 uv = v_texcoord;
+        vec3 col = 0.5 + 0.5*cos(iTime + uv.xyx + vec3(0,2,4));
+        fragColor = vec4(col, 1.0);
+    }
+    """
+
+    # ShaderToy compatibility wrapper
+    SHADERTOY_WRAPPER = """
+    #version 330
+    uniform float iTime;
+    uniform vec2 iResolution;
+    uniform int iFrame;
+    uniform float iTimeDelta;
+    uniform vec4 iMouse;
+    in vec2 v_texcoord;
+    out vec4 fragColor;
+
+    // --- ShaderToy code begins ---
+    {SHADERTOY_CODE}
+    // --- ShaderToy code ends ---
+
+    void main() {{
+        vec2 fragCoord = v_texcoord * iResolution;
+        mainImage(fragColor, fragCoord);
+    }}
+    """
+
+    def __init__(self, width: int = 1920, height: int = 1080):
+        self.width = width
+        self.height = height
+        self.ctx = None
+        self.prog = None
+        self.fbo = None
+        self.vao = None
+        self._initialized = False
+
+    def _init_context(self):
+        if self._initialized:
+            return True
+        try:
+            import moderngl
+            try:
+                self.ctx = moderngl.create_standalone_context(backend="egl")
+            except Exception:
+                self.ctx = moderngl.create_standalone_context()
+            self._initialized = True
+            return True
+        except Exception as e:
+            logger.warning(f"HeadlessGLSL: cannot create OpenGL context: {e}")
+            return False
+
+    def compile(self, fragment_source: str, textures: Optional[Dict[str, np.ndarray]] = None) -> bool:
+        """Compile a fragment shader program."""
+        if not self._init_context():
+            return False
+        try:
+            self.prog = self.ctx.program(
+                vertex_shader=self.VERTEX_SHADER,
+                fragment_shader=fragment_source,
+            )
+        except Exception as e:
+            logger.error(f"HeadlessGLSL: shader compile error: {e}")
+            return False
+
+        # Full-screen quad
+        vertices = np.array([
+            -1.0, -1.0, 0.0, 0.0,
+             1.0, -1.0, 1.0, 0.0,
+            -1.0,  1.0, 0.0, 1.0,
+             1.0,  1.0, 1.0, 1.0,
+        ], dtype="f4")
+        vbo = self.ctx.buffer(vertices)
+        self.vao = self.ctx.simple_vertex_array(self.prog, vbo, "in_position", "in_texcoord")
+
+        # Create FBO
+        color = self.ctx.texture((self.width, self.height), 4)
+        self.fbo = self.ctx.framebuffer(color_attachments=[color])
+
+        # Upload textures
+        self._textures = {}
+        if textures:
+            unit = 1
+            for name, arr in textures.items():
+                if name not in self.prog:
+                    continue
+                h, w = arr.shape[:2]
+                comp = arr.shape[2] if arr.ndim == 3 else 1
+                if arr.dtype == np.float32:
+                    tex = self.ctx.texture((w, h), comp, arr.tobytes(), dtype="f4")
+                else:
+                    tex = self.ctx.texture((w, h), comp, arr.tobytes())
+                tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+                self._textures[name] = (tex, unit)
+                unit += 1
+
+        return True
+
+    def render_frame(self, time: float = 0.0, frame: int = 0, dt: float = 0.033) -> Optional[np.ndarray]:
+        """Render one frame, returns (H, W, 3) uint8 array or None."""
+        if not self._initialized or self.prog is None:
+            return None
+
+        self.fbo.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+
+        # Set uniforms
+        if "iTime" in self.prog:
+            self.prog["iTime"].value = time
+        if "iResolution" in self.prog:
+            self.prog["iResolution"].value = (float(self.width), float(self.height))
+        if "iFrame" in self.prog:
+            self.prog["iFrame"].value = frame
+        if "iTimeDelta" in self.prog:
+            self.prog["iTimeDelta"].value = dt
+        if "iMouse" in self.prog:
+            self.prog["iMouse"].value = (0.0, 0.0, 0.0, 0.0)
+
+        # Bind textures
+        for name, (tex, unit) in self._textures.items():
+            tex.use(unit)
+            if name in self.prog:
+                self.prog[name].value = unit
+
+        self.vao.render(mode=self.ctx.TRIANGLE_STRIP)
+
+        # Read pixels
+        raw = self.fbo.color_attachments[0].read()
+        arr = np.frombuffer(raw, dtype=np.uint8).reshape(self.height, self.width, 4)
+        return np.flipud(arr[:, :, :3]).copy()
+
+    def release(self):
+        if self.ctx:
+            try:
+                self.ctx.release()
+            except Exception:
+                pass
+            self.ctx = None
+            self._initialized = False
+
+    @classmethod
+    def wrap_shadertoy(cls, code: str) -> str:
+        """Wrap ShaderToy mainImage code into a standalone fragment shader."""
+        return cls.SHADERTOY_WRAPPER.replace("{SHADERTOY_CODE}", code)
+
