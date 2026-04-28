@@ -53,6 +53,60 @@ async def movis_font_preview(request):
     except Exception as e:
         return web.json_response({"error": f"preview render failed: {e}"}, status=500)
 
+
+@server.PromptServer.instance.routes.post("/movis/autocaption_preview")
+async def movis_autocaption_preview(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json body"}, status=400)
+
+    try:
+        from .video_ops import render_font_preview_image, encode_preview_image_data_url
+        from .nodes import resolve_autocaption_preview_style
+
+        style = resolve_autocaption_preview_style(payload)
+        text = str(payload.get("text", "自动字幕预览 AutoCaption Preview 中文 English 123"))
+        width = int(payload.get("width", 1200))
+        height = int(payload.get("height", 220))
+        bg_color = str(payload.get("bg_color", "#222222"))
+        x = float(payload.get("x", 0.5))
+        y = float(payload.get("y", 0.5))
+
+        image, meta = render_font_preview_image(
+            font_family=str(style.get("font_family", "")),
+            font_style=str(style.get("font_style", "Regular")),
+            text=text,
+            font_size=int(style.get("font_size", 54)),
+            width=width,
+            height=height,
+            text_color=str(style.get("text_color", "#ffffff")),
+            bg_color=bg_color,
+            x=x,
+            y=y,
+            align=str(style.get("align", "center")),
+            stroke_width=int(style.get("stroke_width", 0)),
+            stroke_color=str(style.get("stroke_color", "#000000")),
+        )
+        return web.json_response({
+            "image": encode_preview_image_data_url(image),
+            "font_path": meta.get("font_path"),
+            "supports_text": bool(meta.get("supports_text", False)),
+            "missing_chars": list(meta.get("missing_chars", [])),
+            "family": meta.get("family"),
+            "style": meta.get("style"),
+            "resolved": {
+                "font_size": int(style.get("font_size", 54)),
+                "text_color": str(style.get("text_color", "#ffffff")),
+                "align": str(style.get("align", "center")),
+                "stroke_width": int(style.get("stroke_width", 0)),
+                "stroke_color": str(style.get("stroke_color", "#000000")),
+            },
+            "applied_style": style.get("applied_style", {}),
+        })
+    except Exception as e:
+        return web.json_response({"error": f"autocaption preview render failed: {e}"}, status=500)
+
 @server.PromptServer.instance.routes.get("/vhs/viewvideo")
 @server.PromptServer.instance.routes.get("/viewvideo")
 async def view_video(request):

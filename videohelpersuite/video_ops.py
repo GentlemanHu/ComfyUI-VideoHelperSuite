@@ -334,6 +334,33 @@ def _append_font_candidate(candidates: list[str], path: str) -> None:
         candidates.append(p)
 
 
+def _font_name_aliases(font_path: str) -> set[str]:
+    aliases: set[str] = set()
+    try:
+        from fontTools.ttLib import TTCollection, TTFont
+
+        fonts = []
+        if str(font_path).lower().endswith(".ttc"):
+            fonts = list(TTCollection(font_path).fonts)
+        else:
+            fonts = [TTFont(font_path, fontNumber=0)]
+
+        for f in fonts:
+            name_table = f.get("name")
+            if not name_table:
+                continue
+            for rec in name_table.names:
+                try:
+                    text = rec.toUnicode().strip()
+                except Exception:
+                    continue
+                if text:
+                    aliases.add(text.lower().replace(" ", "").replace("-", ""))
+    except Exception:
+        pass
+    return aliases
+
+
 def _find_font_file_for_preview(font_family: str, font_style: str, preview_text: str) -> tuple[str | None, dict[str, Any]]:
     family = str(font_family or "").strip()
     style = str(font_style or "").strip()
@@ -384,12 +411,17 @@ def _find_font_file_for_preview(font_family: str, font_style: str, preview_text:
                     fl = f.lower()
                     if not fl.endswith((".ttf", ".otf", ".ttc")):
                         continue
+                    font_path = os.path.join(root, f)
                     compact = fl.replace(" ", "").replace("-", "")
-                    if family_compact and family_compact not in compact:
+                    aliases = _font_name_aliases(font_path)
+                    family_ok = (family_compact in compact) or any(family_compact in a for a in aliases)
+                    if family_compact and not family_ok:
                         continue
                     if style_compact and style_compact not in compact and style_compact not in {"regular", "normal"}:
-                        continue
-                    _append_font_candidate(candidates, os.path.join(root, f))
+                        style_ok = any(style_compact in a for a in aliases)
+                        if not style_ok:
+                            continue
+                    _append_font_candidate(candidates, font_path)
         except Exception:
             continue
 

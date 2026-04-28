@@ -2724,6 +2724,83 @@ if HAS_CUSTOM_FEATURES:
 
             return (t, count, drift_ms, sync_ok, json.dumps(style, ensure_ascii=False, indent=2))
 
+
+def resolve_autocaption_preview_style(payload: dict) -> dict:
+    """解析 AutoCaption 实时预览样式，优先级与节点保持一致：
+    style_preset -> caption_json_param -> custom_override_json -> 显式控件。
+    """
+    if not HAS_GENTLE_CAPTION:
+        raise RuntimeError("caption 模块不可用")
+
+    cp = GentleCaption()
+    style_preset = str(payload.get("style_preset", "classic_white"))
+    style = CaptionStylePreset._preset_dict(style_preset, True)
+
+    caption_json_param = str(payload.get("caption_json_param", "") or "").strip()
+    if caption_json_param:
+        style.update(cp.parse_caption_params(caption_json_param))
+
+    override_dict = {}
+    custom_override_json = str(payload.get("custom_override_json", "") or "").strip()
+    if custom_override_json:
+        maybe = cp.parse_caption_params(custom_override_json)
+        if isinstance(maybe, dict):
+            override_dict = dict(maybe)
+            style.update(override_dict)
+
+    requested_family = str(payload.get("font_family", "") or "").strip()
+    requested_style = str(payload.get("font_style", "Regular") or "Regular").strip() or "Regular"
+    style_family = str(style.get("Fontname", "Sans Serif"))
+    family, fstyle = normalize_movis_font_request(requested_family or style_family, requested_style)
+
+    text_color = str(payload.get("text_color", "") or "").strip() or str(style.get("highlight_color", "#ffffff"))
+    align = str(payload.get("align", "center") or "center").strip().lower()
+    if align not in {"left", "center", "right"}:
+        align = "center"
+
+    stroke_width = int(payload.get("stroke_width", 0) or 0)
+    stroke_color = str(payload.get("stroke_color", "#000000") or "#000000")
+    font_size = float(payload.get("font_size", style.get("Fontsize", 54)) or style.get("Fontsize", 54))
+
+    # JSON override 对细分样式拥有更高优先级
+    if str(override_dict.get("font_family", override_dict.get("Fontname", "")) or "").strip():
+        family = str(override_dict.get("font_family", override_dict.get("Fontname"))).strip()
+    if str(override_dict.get("font_style", "") or "").strip():
+        fstyle = str(override_dict.get("font_style")).strip()
+    family, fstyle = normalize_movis_font_request(family, fstyle)
+
+    if str(override_dict.get("text_color", "") or "").strip():
+        text_color = str(override_dict.get("text_color"))
+    elif str(override_dict.get("highlight_color", "") or "").strip():
+        text_color = str(override_dict.get("highlight_color"))
+    if str(override_dict.get("align", "") or "").strip():
+        _a = str(override_dict.get("align")).strip().lower()
+        if _a in {"left", "center", "right"}:
+            align = _a
+    if "stroke_width" in override_dict:
+        try:
+            stroke_width = int(override_dict.get("stroke_width"))
+        except Exception:
+            pass
+    if str(override_dict.get("stroke_color", "") or "").strip():
+        stroke_color = str(override_dict.get("stroke_color"))
+    if "font_size" in override_dict or "Fontsize" in override_dict:
+        try:
+            font_size = float(override_dict.get("font_size", override_dict.get("Fontsize", font_size)))
+        except Exception:
+            pass
+
+    return {
+        "font_family": family,
+        "font_style": fstyle,
+        "font_size": max(8, int(round(font_size))),
+        "text_color": text_color,
+        "align": align,
+        "stroke_width": max(0, int(stroke_width)),
+        "stroke_color": stroke_color,
+        "applied_style": style,
+    }
+
 # Node mappings
 NODE_CLASS_MAPPINGS = {
     # Original nodes

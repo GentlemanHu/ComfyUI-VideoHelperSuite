@@ -2196,6 +2196,91 @@ app.registerExtension({
                 }
                 schedulePreview();
             });
+        } else if (nodeData?.name == "VHS_MOVIS_AutoCaptionTimeline") {
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                const node = this;
+                const img = document.createElement("img");
+                img.style.width = "100%";
+                img.style.maxHeight = "190px";
+                img.style.objectFit = "contain";
+                img.style.background = "#111";
+                img.style.borderRadius = "6px";
+                img.style.border = "1px solid #333";
+
+                const previewWidget = node.addDOMWidget("movis_autocaption_preview", "subtitle_preview", img, {
+                    serialize: false,
+                    hideOnZoom: false,
+                });
+                previewWidget.serialize = false;
+                previewWidget.computeSize = function(width) {
+                    return [width, 200];
+                };
+
+                let timer = null;
+                let seq = 0;
+                const watched = new Set([
+                    "style_preset", "font_family", "font_style", "font_size", "text_color", "align",
+                    "stroke_width", "stroke_color", "caption_json_param", "custom_override_json",
+                    "position_x", "position_y", "layout_mode", "safe_margin_ratio", "font_scale",
+                ]);
+
+                const getWidgetValue = (name, fallback = undefined) => {
+                    const w = node.widgets?.find((x) => x.name === name);
+                    return w ? w.value : fallback;
+                };
+
+                const requestPreview = async () => {
+                    const requestId = ++seq;
+                    const payload = {
+                        style_preset: String(getWidgetValue("style_preset", "classic_white")),
+                        font_family: String(getWidgetValue("font_family", "")),
+                        font_style: String(getWidgetValue("font_style", "Regular")),
+                        font_size: Number(getWidgetValue("font_size", 54)),
+                        text_color: String(getWidgetValue("text_color", "#ffffff")),
+                        align: String(getWidgetValue("align", "center")),
+                        stroke_width: Number(getWidgetValue("stroke_width", 0)),
+                        stroke_color: String(getWidgetValue("stroke_color", "#000000")),
+                        caption_json_param: String(getWidgetValue("caption_json_param", "")),
+                        custom_override_json: String(getWidgetValue("custom_override_json", "")),
+                        x: Number(getWidgetValue("position_x", 0.5)),
+                        y: Number(getWidgetValue("position_y", 0.5)),
+                        width: 1200,
+                        height: 220,
+                        bg_color: "#222222",
+                        text: "自动字幕预览 AutoCaption Preview 中文 English 123",
+                    };
+
+                    try {
+                        const resp = await fetch(api.apiURL("/movis/autocaption_preview"), {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(payload),
+                        });
+                        if (!resp.ok) return;
+                        const data = await resp.json();
+                        if (requestId !== seq) return;
+                        if (data?.image) {
+                            img.src = data.image;
+                            const resolved = data?.resolved || {};
+                            img.title = `font=${data?.family || ""}/${data?.style || ""}\nsize=${resolved.font_size || ""}\ncolor=${resolved.text_color || ""}\nalign=${resolved.align || ""}\npath=${data?.font_path || ""}`;
+                            node.setDirtyCanvas(true, true);
+                        }
+                    } catch (_e) {
+                        // ignore
+                    }
+                };
+
+                const schedulePreview = () => {
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(requestPreview, 300);
+                };
+
+                for (const w of node.widgets || []) {
+                    if (!watched.has(w.name)) continue;
+                    chainCallback(w, "callback", () => schedulePreview());
+                }
+                schedulePreview();
+            });
         } else if (nodeData?.name == "VHS_SaveImageSequence") {
             //Disabled for safety as VHS_SaveImageSequence is not currently merged
             //addDateFormating(nodeType, "directory_name", timestamp_widget=true);
