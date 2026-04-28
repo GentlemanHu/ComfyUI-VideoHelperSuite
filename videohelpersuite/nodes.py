@@ -3019,3 +3019,14 @@ if HAS_CUSTOM_FEATURES:
         })
     except NameError as e:
         print(f"DepthFlow/Video nodes not available: {e}")
+
+    # Try to add ShaderFlow nodes if available
+    try:
+        from .shaderflow_nodes import (
+            NODE_CLASS_MAPPINGS as SF_CLASS_MAPPINGS,
+            NODE_DISPLAY_NAME_MAPPINGS as SF_DISPLAY_MAPPINGS,
+        )
+        NODE_CLASS_MAPPINGS.update(SF_CLASS_MAPPINGS)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SF_DISPLAY_MAPPINGS)
+    except Exception as e:
+        print(f"ShaderFlow nodes not available: {e}")
