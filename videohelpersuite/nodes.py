@@ -45,6 +45,7 @@ try:
         _COMMON_FONT_STYLES,
         choose_default_font,
         get_movis_fonts,
+        normalize_movis_font_request,
         validate_font_family,
         validate_font_style,
         MovisTimelinePro,
@@ -1681,6 +1682,18 @@ if HAS_CUSTOM_FEATURES:
             self._has_audio_cache = {}
             self._font_name_cache = None
 
+        def _normalize_text_align(self, value: str) -> str:
+            align = str(value or "center").strip().lower()
+            return align if align in {"left", "center", "right"} else "center"
+
+        def _safe_color_text(self, value: str, default: str) -> str:
+            try:
+                from PIL import ImageColor
+                ImageColor.getcolor(str(value), "RGBA")
+                return str(value)
+            except Exception:
+                return str(default)
+
         def _extract_segment_text(self, seg):
             try:
                 if isinstance(seg, dict):
@@ -2039,7 +2052,7 @@ if HAS_CUSTOM_FEATURES:
                 return None
             return best
 
-        def _append_segment_text(self, t, seg, source_start, timeline_start, timeline_end, start_offset, position_x, position_y, default_font_size, default_font_family, default_color, default_opacity, force_font_family="", auto_font_fallback=True):
+        def _append_segment_text(self, t, seg, source_start, timeline_start, timeline_end, start_offset, position_x, position_y, default_font_size, default_font_family, default_font_style, default_color, default_opacity, default_align="center", default_stroke_width=0, default_stroke_color="#000000", force_font_family="", force_font_style="", auto_font_fallback=True):
             if isinstance(seg, dict):
                 st = float(seg.get("start", 0.0))
                 et = float(seg.get("end", st + 0.01))
@@ -2068,6 +2081,8 @@ if HAS_CUSTOM_FEATURES:
                 force_font_family=force_font_family,
                 auto_font_fallback=bool(auto_font_fallback),
             )
+            requested_style = str(force_font_style or default_font_style or "Regular").strip() or "Regular"
+            seg_font_family, seg_font_style = normalize_movis_font_request(seg_font_family, requested_style)
 
             t["text_tracks"].append(
                 {
@@ -2076,16 +2091,22 @@ if HAS_CUSTOM_FEATURES:
                     "duration": max(0.01, out_et - out_st),
                     "font_size": float(default_font_size),
                     "font_family": str(seg_font_family),
+                    "font_style": str(seg_font_style),
                     "color": str(default_color),
                     "position_x": float(position_x),
                     "position_y": float(position_y),
                     "opacity": float(default_opacity),
+                    "align": str(default_align),
+                    "stroke_width": int(default_stroke_width),
+                    "stroke_color": str(default_stroke_color),
                 }
             )
             return 1
 
         @classmethod
         def INPUT_TYPES(cls):
+            fonts = get_movis_fonts()
+            default_font = choose_default_font(fonts)
             return {
                 "required": {
                     "timeline": ("MOVIS_TIMELINE",),
@@ -2102,11 +2123,17 @@ if HAS_CUSTOM_FEATURES:
                     "replace_existing": ("BOOLEAN", {"default": False}),
                     "show_progress": ("BOOLEAN", {"default": True}),
                     "auto_layout": ("BOOLEAN", {"default": True, "tooltip": "根据时间线尺寸与宽高比自动适配字幕字号与安全区；关闭后严格使用手动位置/字号"}),
+                    "font_family": (fonts, {"default": default_font, "tooltip": "字幕字体族；直接使用 movis/Qt 可识别 family 名"}),
+                    "font_style": (_COMMON_FONT_STYLES, {"default": "Regular", "tooltip": "字幕样式；第一版为通用下拉，不强制与字体联动"}),
+                    "font_size": ("FLOAT", {"default": 54.0, "min": 8.0, "max": 300.0, "tooltip": "字幕字号"}),
+                    "text_color": ("STRING", {"default": "#ffffff", "tooltip": "字幕文字颜色"}),
+                    "align": (["left", "center", "right"], {"default": "center", "tooltip": "字幕对齐方式"}),
+                    "stroke_width": ("INT", {"default": 0, "min": 0, "max": 64, "tooltip": "字幕描边宽度（当前主要用于预览/样式透传）"}),
+                    "stroke_color": ("STRING", {"default": "#000000", "tooltip": "字幕描边颜色（当前主要用于预览/样式透传）"}),
                 },
                 "optional": {
                     "layout_mode": (["auto_safe", "auto_bottom", "manual"], {"default": "auto_safe", "tooltip": "字幕布局策略：安全自适配/底部贴边自适配/完全手动"}),
                     "audio_source_strategy": (["auto", "mixed_priority", "explicit_only", "audio_tracks_only", "bgm_only", "video_only"], {"default": "auto", "tooltip": "音频识别来源策略"}),
-                    "font_family": ("STRING", {"default": "", "tooltip": "可选：强制字幕字体；留空则走样式字体并自动中文回退"}),
                     "auto_font_fallback": ("BOOLEAN", {"default": True, "tooltip": "自动检测中文字幕并切换到可用中文字体，避免方块字"}),
                     "safe_margin_ratio": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.35, "step": 0.005, "tooltip": "字幕安全边距比例；0表示自动"}),
                     "font_scale": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.01, "tooltip": "字幕字号缩放（相对样式字号）"}),
@@ -2253,9 +2280,15 @@ if HAS_CUSTOM_FEATURES:
             replace_existing,
             show_progress,
             auto_layout,
+            font_family,
+            font_style,
+            font_size,
+            text_color,
+            align,
+            stroke_width,
+            stroke_color,
             layout_mode="auto_safe",
             audio_source_strategy="auto",
-            font_family="",
             auto_font_fallback=True,
             safe_margin_ratio=0.0,
             font_scale=1.0,
@@ -2343,10 +2376,16 @@ if HAS_CUSTOM_FEATURES:
             if pbar is not None:
                 pbar.update(1)
 
-            default_font_size = float(style.get("Fontsize", 54))
-            default_font_family = str(style.get("Fontname", "Sans Serif"))
-            default_color = str(style.get("highlight_color", "white"))
+            default_font_size = float(font_size if font_size is not None else style.get("Fontsize", 54))
+            style_font_family = str(style.get("Fontname", "Sans Serif"))
+            requested_font_family = str(font_family or "").strip()
+            requested_font_style = str(font_style or "Regular").strip() or "Regular"
+            default_font_family, default_font_style = normalize_movis_font_request(requested_font_family or style_font_family, requested_font_style)
+            default_color = self._safe_color_text(text_color if str(text_color or "").strip() else style.get("highlight_color", "white"), "#ffffff")
             default_opacity = 1.0
+            default_align = self._normalize_text_align(align)
+            default_stroke_width = max(0, int(stroke_width))
+            default_stroke_color = self._safe_color_text(stroke_color, "#000000")
 
             override_video = self._override_resolved_path(override_dict, "force_video_path")
             override_audio = self._override_resolved_path(override_dict, "force_audio_path")
@@ -2360,11 +2399,29 @@ if HAS_CUSTOM_FEATURES:
             input_audio_strategy = self._normalize_audio_strategy(audio_source_strategy)
             audio_source_strategy = self._normalize_audio_strategy(override_audio_strategy) if str(override_audio_strategy).strip() else input_audio_strategy
 
-            force_font_family = str(font_family or "").strip()
-            if not force_font_family:
-                force_font_family = str(override_dict.get("font_family", override_dict.get("Fontname", "")) or "").strip()
+            force_font_family = str(override_dict.get("font_family", override_dict.get("Fontname", "")) or "").strip()
+            force_font_style = str(override_dict.get("font_style", "") or "").strip()
             if "auto_font_fallback" in override_dict:
                 auto_font_fallback = bool(override_dict.get("auto_font_fallback"))
+
+            if str(override_dict.get("text_color", "")).strip():
+                default_color = self._safe_color_text(override_dict.get("text_color"), default_color)
+            elif str(override_dict.get("highlight_color", "")).strip():
+                default_color = self._safe_color_text(override_dict.get("highlight_color"), default_color)
+            if str(override_dict.get("align", "")).strip():
+                default_align = self._normalize_text_align(override_dict.get("align"))
+            if "stroke_width" in override_dict:
+                try:
+                    default_stroke_width = max(0, int(override_dict.get("stroke_width")))
+                except Exception:
+                    pass
+            if str(override_dict.get("stroke_color", "")).strip():
+                default_stroke_color = self._safe_color_text(override_dict.get("stroke_color"), default_stroke_color)
+
+            if not force_font_family:
+                force_font_family = default_font_family
+            if not force_font_style:
+                force_font_style = default_font_style
 
             transcribe_kwargs = {}
             _no_speech = self._safe_float(override_dict.get("no_speech_threshold", override_dict.get("whisper_no_speech_threshold", None)), None)
@@ -2446,9 +2503,14 @@ if HAS_CUSTOM_FEATURES:
                         position_y=layout_y,
                         default_font_size=layout_font_size,
                         default_font_family=default_font_family,
+                        default_font_style=default_font_style,
                         default_color=default_color,
                         default_opacity=default_opacity,
+                        default_align=default_align,
+                        default_stroke_width=default_stroke_width,
+                        default_stroke_color=default_stroke_color,
                         force_font_family=force_font_family,
+                        force_font_style=force_font_style,
                         auto_font_fallback=auto_font_fallback,
                     )
                 logger.info(f"[MovisAutoCaptionTimeline] 模式=显式全局音频，字幕条数={count}")
@@ -2491,9 +2553,14 @@ if HAS_CUSTOM_FEATURES:
                             position_y=layout_y,
                             default_font_size=layout_font_size,
                             default_font_family=default_font_family,
+                            default_font_style=default_font_style,
                             default_color=default_color,
                             default_opacity=default_opacity,
+                            default_align=default_align,
+                            default_stroke_width=default_stroke_width,
+                            default_stroke_color=default_stroke_color,
                             force_font_family=force_font_family,
+                            force_font_style=force_font_style,
                             auto_font_fallback=auto_font_fallback,
                         )
                     count += clip_added
@@ -2519,9 +2586,14 @@ if HAS_CUSTOM_FEATURES:
                             position_y=layout_y,
                             default_font_size=layout_font_size,
                             default_font_family=default_font_family,
+                            default_font_style=default_font_style,
                             default_color=default_color,
                             default_opacity=default_opacity,
+                            default_align=default_align,
+                            default_stroke_width=default_stroke_width,
+                            default_stroke_color=default_stroke_color,
                             force_font_family=force_font_family,
+                            force_font_style=force_font_style,
                             auto_font_fallback=auto_font_fallback,
                         )
                     count += tr_added
@@ -2552,10 +2624,15 @@ if HAS_CUSTOM_FEATURES:
                         position_y=layout_y,
                         default_font_size=layout_font_size,
                         default_font_family=default_font_family,
+                        default_font_style=default_font_style,
                         default_color=default_color,
                         default_opacity=default_opacity,
-                            force_font_family=force_font_family,
-                            auto_font_fallback=auto_font_fallback,
+                        default_align=default_align,
+                        default_stroke_width=default_stroke_width,
+                        default_stroke_color=default_stroke_color,
+                        force_font_family=force_font_family,
+                        force_font_style=force_font_style,
+                        auto_font_fallback=auto_font_fallback,
                     )
                 logger.info(
                     f"[MovisAutoCaptionTimeline] 模式=BGM全局识别，字幕条数={count}, "
@@ -2583,9 +2660,14 @@ if HAS_CUSTOM_FEATURES:
                             position_y=layout_y,
                             default_font_size=layout_font_size,
                             default_font_family=default_font_family,
+                            default_font_style=default_font_style,
                             default_color=default_color,
                             default_opacity=default_opacity,
+                            default_align=default_align,
+                            default_stroke_width=default_stroke_width,
+                            default_stroke_color=default_stroke_color,
                             force_font_family=force_font_family,
+                            force_font_style=force_font_style,
                             auto_font_fallback=auto_font_fallback,
                         )
                     count += clip_added
@@ -2606,9 +2688,14 @@ if HAS_CUSTOM_FEATURES:
                         position_y=layout_y,
                         default_font_size=layout_font_size,
                         default_font_family=default_font_family,
+                        default_font_style=default_font_style,
                         default_color=default_color,
                         default_opacity=default_opacity,
+                        default_align=default_align,
+                        default_stroke_width=default_stroke_width,
+                        default_stroke_color=default_stroke_color,
                         force_font_family=force_font_family,
+                        force_font_style=force_font_style,
                         auto_font_fallback=auto_font_fallback,
                     )
                 logger.info(f"[MovisAutoCaptionTimeline] 模式=回退单源识别，字幕条数={count}")

@@ -179,6 +179,53 @@ def validate_font_style(font_family: str, font_style: str) -> str:
     return fallback
 
 
+def normalize_movis_font_request(font_family: str, font_style: str = "Regular") -> tuple[str, str]:
+    family = str(font_family or "").strip()
+    style = str(font_style or "").strip() or "Regular"
+
+    if not family:
+        safe_family = validate_font_family(choose_default_font(get_movis_fonts()))
+        safe_style = validate_font_style(safe_family, style)
+        return safe_family, safe_style
+
+    fonts = get_movis_fonts()
+    if family in fonts:
+        return family, validate_font_style(family, style)
+
+    family_compact = family.replace("_", " ").strip()
+    if family_compact in fonts:
+        return family_compact, validate_font_style(family_compact, style)
+
+    # 兼容旧工作流常见写法：Lemon-Regular / UbuntuMono-Bold / Roboto Bold
+    split_candidates = []
+    for sep in ("-", ",", "|"):
+        if sep in family:
+            left, right = family.rsplit(sep, 1)
+            split_candidates.append((left.strip(), right.strip()))
+    parts = family.split()
+    if len(parts) >= 2:
+        split_candidates.append((" ".join(parts[:-1]).strip(), parts[-1].strip()))
+
+    for maybe_family, maybe_style in split_candidates:
+        if not maybe_family:
+            continue
+        safe_family = validate_font_family(maybe_family)
+        family_styles = get_movis_styles(safe_family)
+        candidate_style = str(maybe_style or style).strip() or style
+        if candidate_style in family_styles:
+            return safe_family, candidate_style
+        if style in family_styles:
+            return safe_family, style
+        if candidate_style:
+            lowered = {s.lower(): s for s in family_styles}
+            if candidate_style.lower() in lowered:
+                return safe_family, lowered[candidate_style.lower()]
+
+    safe_family = validate_font_family(family)
+    safe_style = validate_font_style(safe_family, style)
+    return safe_family, safe_style
+
+
 def _movis_text_supports_font_style() -> bool:
     global _TEXT_SUPPORTS_FONT_STYLE
     if _TEXT_SUPPORTS_FONT_STYLE is not None:
