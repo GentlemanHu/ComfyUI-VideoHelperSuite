@@ -507,6 +507,17 @@ class DepthFlowGenerator:
                     "default": True,
                     "tooltip": "CUDA路径：抗锯齿滤波。建议开启。"
                 }),
+                "cuda_depth_smooth": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "tooltip": "CUDA路径：深度图高斯平滑sigma。0=不平滑(与GLSL一致,推荐)。0.3-0.6=轻度平滑。>1=重度平滑。"
+                }),
+                "render_backend": (["auto", "cuda", "opengl"], {
+                    "default": "auto",
+                    "tooltip": "渲染后端 | auto: CUDA优先,失败回退OpenGL(推荐) | cuda: 仅CUDA | opengl: 仅subprocess OpenGL路径"
+                }),
             },
         }
 
@@ -692,6 +703,8 @@ class DepthFlowGenerator:
         cuda_enable_inpaint=False,
         cuda_inpaint_threshold=3.0,
         cuda_enable_aa=True,
+        cuda_depth_smooth=0.0,
+        render_backend="auto",
     ):
         """
         Professional DepthFlow video generation with cinematic camera movements
@@ -753,37 +766,45 @@ class DepthFlowGenerator:
         # ======  CUDA direct rendering (no subprocess/OpenGL)  =====
         # ═══════════════════════════════════════════════════════════
         cuda_done = False
-        try:
-            cuda_done = self._try_cuda_render(
-                image_tensor=image,
-                target_width=target_width,
-                target_height=target_height,
-                output_path=output_path,
-                output_format=output_format,
-                duration=duration,
-                fps=fps,
-                quality=quality,
-                ssaa=ssaa,
-                camera_movement=camera_movement,
-                movement_intensity=movement_intensity,
-                movement_smooth=movement_smooth,
-                movement_loop=movement_loop,
-                movement_reverse=movement_reverse,
-                movement_phase=movement_phase,
-                steady_depth=steady_depth,
-                isometric=isometric,
-                video_codec=video_codec,
-                depth_estimator=depth_estimator,
-                output_frames=output_frames,
-                max_frames_export=max_frames_export,
-                cuda_enable_inpaint=cuda_enable_inpaint,
-                cuda_inpaint_threshold=cuda_inpaint_threshold,
-                cuda_enable_aa=cuda_enable_aa,
-            )
-        except Exception as cuda_err:
-            print(f"[DepthFlow] CUDA direct render failed: {cuda_err}")
-            print(f"[DepthFlow] Falling back to subprocess OpenGL path...")
-            cuda_done = False
+        if render_backend != "opengl":
+            try:
+                cuda_done = self._try_cuda_render(
+                    image_tensor=image,
+                    target_width=target_width,
+                    target_height=target_height,
+                    output_path=output_path,
+                    output_format=output_format,
+                    duration=duration,
+                    fps=fps,
+                    quality=quality,
+                    ssaa=ssaa,
+                    camera_movement=camera_movement,
+                    movement_intensity=movement_intensity,
+                    movement_smooth=movement_smooth,
+                    movement_loop=movement_loop,
+                    movement_reverse=movement_reverse,
+                    movement_phase=movement_phase,
+                    steady_depth=steady_depth,
+                    isometric=isometric,
+                    video_codec=video_codec,
+                    depth_estimator=depth_estimator,
+                    output_frames=output_frames,
+                    max_frames_export=max_frames_export,
+                    cuda_enable_inpaint=cuda_enable_inpaint,
+                    cuda_inpaint_threshold=cuda_inpaint_threshold,
+                    cuda_enable_aa=cuda_enable_aa,
+                    cuda_depth_smooth=cuda_depth_smooth,
+                )
+            except Exception as cuda_err:
+                print(f"[DepthFlow] CUDA direct render failed: {cuda_err}")
+                if render_backend == "cuda":
+                    raise RuntimeError(
+                        f"CUDA render failed and render_backend='cuda': {cuda_err}"
+                    )
+                print(f"[DepthFlow] Falling back to subprocess OpenGL path...")
+                cuda_done = False
+        else:
+            print(f"[DepthFlow] Skipping CUDA (render_backend='opengl')")
 
         if cuda_done:
             final_path = os.path.abspath(output_path)
@@ -1170,6 +1191,7 @@ class DepthFlowGenerator:
         cuda_enable_inpaint=False,
         cuda_inpaint_threshold=3.0,
         cuda_enable_aa=True,
+        cuda_depth_smooth=0.0,
     ) -> bool:
         """Attempt to render directly on CUDA.  Returns True on success."""
         if not torch.cuda.is_available():
@@ -1248,7 +1270,11 @@ class DepthFlowGenerator:
         if dep_f.max() > 1.5:
             dep_f = dep_f / 255.0
 
-        renderer = cuda_renderer.CudaDepthFlowRenderer(img_f, dep_f)
+        renderer = cuda_renderer.CudaDepthFlowRenderer(
+            img_f, dep_f,
+            depth_post_process=(cuda_depth_smooth > 0),
+            depth_smooth_sigma=cuda_depth_smooth,
+        )
         pbar = ProgressBar(int(duration * fps))
 
         def _progress(cur, total):
