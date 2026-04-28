@@ -491,24 +491,17 @@ class DepthFlowGenerator:
                     "tooltip": "最多导出帧数 | 0: 导出所有帧 | >0: 限制帧数(防止内存溢出) | 建议: 250-500帧"
                 }),
 
-                # CUDA Inpaint settings
+                # CUDA Edge Soften settings
                 "cuda_enable_inpaint": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "CUDA路径：修复大视差边缘拉伸/撕裂。用原始图像平滑替换陟岭区域。"
+                    "default": False,
+                    "tooltip": "CUDA路径：边缘柔化。对深度不连续处拉伸的边缘做高斯模糊。不会产生鬼影。默认关闭。"
                 }),
                 "cuda_inpaint_threshold": ("FLOAT", {
-                    "default": 0.5,
-                    "min": 0.05,
-                    "max": 5.0,
-                    "step": 0.05,
-                    "tooltip": "CUDA路径：陟岭检测阈值。越低修复越多，但可能影响边缘细节。推荐0.3-1.0。"
-                }),
-                "cuda_inpaint_blur": ("INT", {
-                    "default": 5,
-                    "min": 0,
-                    "max": 20,
-                    "step": 1,
-                    "tooltip": "CUDA路径：过渡融合半径。越大融合越平滑，0=硬边缘。推荐3-8。"
+                    "default": 3.0,
+                    "min": 1.0,
+                    "max": 20.0,
+                    "step": 0.5,
+                    "tooltip": "CUDA路径：拉伸检测灵敏度。值=UV梯度与期望值的倍数。越低柔化越多。推荐2-5。"
                 }),
                 "cuda_enable_aa": ("BOOLEAN", {
                     "default": True,
@@ -696,9 +689,8 @@ class DepthFlowGenerator:
         depth_estimator="da2",
         output_frames=True,
         max_frames_export=0,
-        cuda_enable_inpaint=True,
-        cuda_inpaint_threshold=0.5,
-        cuda_inpaint_blur=5,
+        cuda_enable_inpaint=False,
+        cuda_inpaint_threshold=3.0,
         cuda_enable_aa=True,
     ):
         """
@@ -786,7 +778,6 @@ class DepthFlowGenerator:
                 max_frames_export=max_frames_export,
                 cuda_enable_inpaint=cuda_enable_inpaint,
                 cuda_inpaint_threshold=cuda_inpaint_threshold,
-                cuda_inpaint_blur=cuda_inpaint_blur,
                 cuda_enable_aa=cuda_enable_aa,
             )
         except Exception as cuda_err:
@@ -1176,9 +1167,8 @@ class DepthFlowGenerator:
         movement_loop, movement_reverse, movement_phase,
         steady_depth, isometric, video_codec, depth_estimator,
         output_frames=True, max_frames_export=0,
-        cuda_enable_inpaint=True,
-        cuda_inpaint_threshold=0.5,
-        cuda_inpaint_blur=5,
+        cuda_enable_inpaint=False,
+        cuda_inpaint_threshold=3.0,
         cuda_enable_aa=True,
     ) -> bool:
         """Attempt to render directly on CUDA.  Returns True on success."""
@@ -1277,7 +1267,6 @@ class DepthFlowGenerator:
             inpaint_kwargs = dict(
                 enable_inpaint=cuda_enable_inpaint,
                 inpaint_threshold=cuda_inpaint_threshold,
-                inpaint_blur=cuda_inpaint_blur,
                 enable_aa=cuda_enable_aa,
             )
         else:
