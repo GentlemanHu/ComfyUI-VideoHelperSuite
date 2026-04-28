@@ -490,6 +490,34 @@ class DepthFlowGenerator:
                     "default": 0, "min": 0, "max": 10000, "step": 1,
                     "tooltip": "最多导出帧数 | 0: 导出所有帧 | >0: 限制帧数(防止内存溢出) | 建议: 250-500帧"
                 }),
+
+                # CUDA Inpaint settings
+                "cuda_enable_inpaint": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "CUDA路径：修复大视差遮挡露洞/拉丝/粘稠边缘。建议开启。"
+                }),
+                "cuda_inpaint_threshold": ("FLOAT", {
+                    "default": 0.04,
+                    "min": 0.005,
+                    "max": 0.2,
+                    "step": 0.005,
+                    "tooltip": "CUDA路径：disocclusion检测阈值。越低修复越多，但可能误伤细节。推荐0.03-0.06。"
+                }),
+                "cuda_inpaint_iterations": ("INT", {
+                    "default": 6,
+                    "min": 0,
+                    "max": 20,
+                    "step": 1,
+                    "tooltip": "CUDA路径：补洞迭代次数。大视差推荐6-10，低视差可设0-4。"
+                }),
+                "cuda_inpaint_depth_aware": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "CUDA路径：结合深度边缘检测，减少误修复和前景污染。"
+                }),
+                "cuda_enable_aa": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "CUDA路径：inpaint之后执行抗锯齿。建议开启。"
+                }),
             },
         }
 
@@ -672,6 +700,11 @@ class DepthFlowGenerator:
         depth_estimator="da2",
         output_frames=True,
         max_frames_export=0,
+        cuda_enable_inpaint=True,
+        cuda_inpaint_threshold=0.04,
+        cuda_inpaint_iterations=6,
+        cuda_inpaint_depth_aware=True,
+        cuda_enable_aa=True,
     ):
         """
         Professional DepthFlow video generation with cinematic camera movements
@@ -756,6 +789,11 @@ class DepthFlowGenerator:
                 depth_estimator=depth_estimator,
                 output_frames=output_frames,
                 max_frames_export=max_frames_export,
+                cuda_enable_inpaint=cuda_enable_inpaint,
+                cuda_inpaint_threshold=cuda_inpaint_threshold,
+                cuda_inpaint_iterations=cuda_inpaint_iterations,
+                cuda_inpaint_depth_aware=cuda_inpaint_depth_aware,
+                cuda_enable_aa=cuda_enable_aa,
             )
         except Exception as cuda_err:
             print(f"[DepthFlow] CUDA direct render failed: {cuda_err}")
@@ -1144,6 +1182,11 @@ class DepthFlowGenerator:
         movement_loop, movement_reverse, movement_phase,
         steady_depth, isometric, video_codec, depth_estimator,
         output_frames=True, max_frames_export=0,
+        cuda_enable_inpaint=True,
+        cuda_inpaint_threshold=0.04,
+        cuda_inpaint_iterations=6,
+        cuda_inpaint_depth_aware=True,
+        cuda_enable_aa=True,
     ) -> bool:
         """Attempt to render directly on CUDA.  Returns True on success."""
         if not torch.cuda.is_available():
@@ -1231,6 +1274,24 @@ class DepthFlowGenerator:
         # Capture frames directly during render to avoid re-decoding mp4
         max_cap = max_frames_export if max_frames_export > 0 else -1
 
+        # Check if CUDA renderer supports inpaint parameters
+        import inspect
+        render_sig = inspect.signature(cuda_renderer.CudaDepthFlowRenderer.render_video)
+        has_inpaint = 'enable_inpaint' in render_sig.parameters
+
+        inpaint_kwargs = {}
+        if has_inpaint:
+            inpaint_kwargs = dict(
+                enable_inpaint=cuda_enable_inpaint,
+                inpaint_threshold=cuda_inpaint_threshold,
+                inpaint_iterations=cuda_inpaint_iterations,
+                inpaint_depth_aware=cuda_inpaint_depth_aware,
+                enable_aa=cuda_enable_aa,
+            )
+        else:
+            print("[DepthFlow] ⚠ CUDA renderer found but does not support "
+                  "inpaint parameters. Please update GentlemanHu/DepthFlow fork.")
+
         renderer.render_video(
             output_path=output_path,
             render_w=target_width,
@@ -1251,6 +1312,7 @@ class DepthFlowGenerator:
             output_format=output_format,
             progress_cb=_progress,
             capture_frames=max_cap if output_frames else 0,
+            **inpaint_kwargs,
         )
 
         # Stash captured frames for _finalize_output to use
