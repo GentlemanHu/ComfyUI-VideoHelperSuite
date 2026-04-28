@@ -1,6 +1,8 @@
 import copy
+import base64
 import datetime
 import difflib
+import io
 import os
 import re
 import sys
@@ -268,52 +270,112 @@ def _safe_color_text(value: str, default: str) -> str:
         return str(default)
 
 
-def _find_font_file_for_preview(font_family: str) -> str | None:
+def _font_scan_dirs() -> list[str]:
+    if sys.platform == "win32":
+        return [
+            "C:/Windows/Fonts",
+            str((Path.home() / "AppData/Local/Microsoft/Windows/Fonts").resolve()),
+        ]
+    if sys.platform == "darwin":
+        return [
+            "/System/Library/Fonts",
+            "/Library/Fonts",
+            str((Path.home() / "Library/Fonts").resolve()),
+        ]
+    return [
+        "/root/.local/share/fonts/custom",
+        str((Path.home() / ".local/share/fonts").resolve()),
+        str((Path.home() / ".fonts").resolve()),
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+    ]
+
+
+def _font_contains_text(font_path: str, text: str) -> tuple[bool, list[str], int]:
+    chars = [ch for ch in str(text or "") if not ch.isspace()]
+    if not chars:
+        return True, [], 0
+    try:
+        from fontTools.ttLib import TTCollection, TTFont  # lazy import
+
+        cmap = {}
+        if str(font_path).lower().endswith(".ttc"):
+            collection = TTCollection(font_path)
+            for ft in collection.fonts:
+                for table in ft["cmap"].tables:
+                    cmap.update(table.cmap)
+        else:
+            font = TTFont(font_path, fontNumber=0)
+            for table in font["cmap"].tables:
+                cmap.update(table.cmap)
+
+        missing = [ch for ch in chars if ord(ch) not in cmap]
+        return len(missing) == 0, missing, len(cmap)
+    except ImportError:
+        print("[Movis Font Preview] Warning: fontTools 未安装，跳过字符覆盖检测。")
+        return True, [], -1
+    except Exception as e:
+        print(f"[Movis Font Preview] Warning: 字体覆盖检测失败: {font_path!r}, error={e}")
+        return True, [], -1
+
+
+def font_support_report(font_path: str, text: str) -> dict[str, Any]:
+    supports_text, missing_chars, cmap_count = _font_contains_text(font_path, text)
+    return {
+        "supports_text": bool(supports_text),
+        "missing_chars": missing_chars,
+        "cmap_count": int(cmap_count),
+    }
+
+
+def _append_font_candidate(candidates: list[str], path: str) -> None:
+    p = str(path or "").strip()
+    if p and os.path.isfile(p):
+        candidates.append(p)
+
+
+def _find_font_file_for_preview(font_family: str, font_style: str, preview_text: str) -> tuple[str | None, dict[str, Any]]:
     family = str(font_family or "").strip()
+    style = str(font_style or "").strip()
     if not family:
-        return None
+        return None, {"supports_text": False, "missing_chars": [], "cmap_count": 0}
+
+    candidates: list[str] = []
 
     if sys.platform.startswith("linux"):
+        if style:
+            try:
+                ret = subprocess.run(
+                    ["fc-match", f"{family}:style={style}", "-f", "%{file}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=4,
+                )
+                if ret.returncode == 0:
+                    _append_font_candidate(candidates, str(ret.stdout or "").strip())
+            except Exception:
+                pass
         try:
             ret = subprocess.run(
-                ["fc-match", "-f", "%{file}", family],
+                ["fc-match", family, "-f", "%{file}"],
                 capture_output=True,
                 text=True,
                 timeout=4,
             )
             if ret.returncode == 0:
-                p = str(ret.stdout or "").strip()
-                if p and os.path.isfile(p):
-                    return p
+                _append_font_candidate(candidates, str(ret.stdout or "").strip())
         except Exception:
             pass
 
     try:
         from matplotlib import font_manager  # lazy import
-        p = font_manager.findfont(family, fallback_to_default=True)
-        if p and os.path.isfile(p):
-            return p
+        _append_font_candidate(candidates, font_manager.findfont(family, fallback_to_default=True))
     except Exception:
         pass
 
-    candidates = []
-    if sys.platform == "win32":
-        candidates = ["C:/Windows/Fonts"]
-    elif sys.platform == "darwin":
-        candidates = [
-            "/System/Library/Fonts",
-            "/Library/Fonts",
-            str((Path.home() / "Library/Fonts").resolve()),
-        ]
-    else:
-        candidates = [
-            "/usr/share/fonts",
-            "/usr/local/share/fonts",
-            str((Path.home() / ".fonts").resolve()),
-        ]
-
-    family_l = family.lower().replace(" ", "")
-    for base in candidates:
+    family_compact = family.lower().replace(" ", "").replace("-", "")
+    style_compact = style.lower().replace(" ", "").replace("-", "")
+    for base in _font_scan_dirs():
         try:
             if not os.path.isdir(base):
                 continue
@@ -322,14 +384,131 @@ def _find_font_file_for_preview(font_family: str) -> str | None:
                     fl = f.lower()
                     if not fl.endswith((".ttf", ".otf", ".ttc")):
                         continue
-                    if family_l in fl.replace(" ", ""):
-                        p = os.path.join(root, f)
-                        if os.path.isfile(p):
-                            return p
+                    compact = fl.replace(" ", "").replace("-", "")
+                    if family_compact and family_compact not in compact:
+                        continue
+                    if style_compact and style_compact not in compact and style_compact not in {"regular", "normal"}:
+                        continue
+                    _append_font_candidate(candidates, os.path.join(root, f))
         except Exception:
             continue
 
-    return None
+    dedup_candidates = list(dict.fromkeys(candidates))
+    fallback_path = dedup_candidates[0] if dedup_candidates else None
+    for p in dedup_candidates:
+        report = font_support_report(p, preview_text)
+        if bool(report.get("supports_text", False)):
+            return p, report
+
+    if fallback_path:
+        report = font_support_report(fallback_path, preview_text)
+        print(
+            f"[Movis Font Preview] Warning: family={family!r}, style={style!r} "
+            f"未找到完整支持文本的字体，回退使用: {fallback_path!r}, "
+            f"missing_chars={report.get('missing_chars', [])[:32]}"
+        )
+        return fallback_path, report
+
+    print(f"[Movis Font Preview] Warning: 未找到可用字体文件 family={family!r}, style={style!r}")
+    return None, {"supports_text": False, "missing_chars": [], "cmap_count": 0}
+
+
+def render_font_preview_image(
+    font_family: str,
+    font_style: str,
+    text: str,
+    font_size: int,
+    width: int,
+    height: int,
+    text_color: str,
+    bg_color: str,
+    x: float = 0.5,
+    y: float = 0.5,
+    align: str = "center",
+    stroke_width: int = 0,
+    stroke_color: str = "#000000",
+) -> tuple[Image.Image, dict[str, Any]]:
+    safe_family = validate_font_family(font_family)
+    safe_style = validate_font_style(safe_family, font_style)
+    safe_text_color = _safe_color_text(text_color, "#ffffff")
+    safe_bg_color = _safe_color_text(bg_color, "#222222")
+    safe_stroke_color = _safe_color_text(stroke_color, "#000000")
+
+    w = _clamp_int(width, 768, 64, 4096)
+    h = _clamp_int(height, 200, 64, 2048)
+    fs = _clamp_int(font_size, 64, 8, 512)
+    sw = _clamp_int(stroke_width, 0, 0, 128)
+    anchor_x = _safe_float(x, 0.5)
+    anchor_y = _safe_float(y, 0.5)
+    safe_align = str(align or "center").strip().lower()
+    if safe_align not in {"left", "center", "right"}:
+        safe_align = "center"
+
+    text_value = str(text or "")
+    font_path, report = _find_font_file_for_preview(safe_family, safe_style, text_value)
+    font = ImageFont.load_default()
+    if font_path:
+        try:
+            font = ImageFont.truetype(font_path, size=fs)
+        except Exception as e:
+            print(f"[Movis Font Preview] Warning: 字体加载失败 {font_path!r}, error={e}")
+    else:
+        print(f"[Movis Font Preview] Warning: 预览将使用默认字体 family={safe_family!r}, style={safe_style!r}")
+
+    supports_text = bool(report.get("supports_text", False))
+    print(f"[Movis Font Preview] family={safe_family!r}, style={safe_style!r}, path={font_path!r}")
+    print(f"[Movis Font Preview] text={text_value!r}, supports_text={supports_text}")
+
+    image = Image.new("RGBA", (w, h), safe_bg_color)
+    draw = ImageDraw.Draw(image)
+    bbox = draw.multiline_textbbox(
+        (0, 0),
+        text_value,
+        font=font,
+        align=safe_align,
+        stroke_width=sw,
+        spacing=4,
+    )
+    text_w = max(1, int(bbox[2] - bbox[0]))
+    text_h = max(1, int(bbox[3] - bbox[1]))
+
+    px = _position_value_to_pixels(anchor_x, w)
+    py = _position_value_to_pixels(anchor_y, h)
+    if safe_align == "left":
+        draw_x = px
+    elif safe_align == "right":
+        draw_x = px - text_w
+    else:
+        draw_x = px - text_w * 0.5
+    draw_y = py - text_h * 0.5
+
+    draw.multiline_text(
+        (float(draw_x), float(draw_y)),
+        text_value,
+        font=font,
+        fill=safe_text_color,
+        align=safe_align,
+        stroke_width=sw,
+        stroke_fill=safe_stroke_color,
+        spacing=4,
+    )
+
+    meta = {
+        "font_path": font_path,
+        "supports_text": supports_text,
+        "missing_chars": list(report.get("missing_chars", [])),
+        "cmap_count": int(report.get("cmap_count", 0)),
+        "family": safe_family,
+        "style": safe_style,
+    }
+    return image, meta
+
+
+def encode_preview_image_data_url(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="PNG", optimize=True)
+    data = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{data}"
 
 
 def _pil_to_comfy_image(img: Image.Image):
@@ -3286,66 +3465,20 @@ class MovisFontPreview:
     FUNCTION = "preview"
 
     def preview(self, text, font_family, font_style, font_size, text_color, bg_color, width, height, x, y, align, stroke_width, stroke_color):
-        safe_family = validate_font_family(font_family)
-        _safe_style = validate_font_style(safe_family, font_style)
-        safe_text_color = _safe_color_text(text_color, "#ffffff")
-        safe_bg_color = _safe_color_text(bg_color, "#222222")
-        safe_stroke_color = _safe_color_text(stroke_color, "#000000")
-
-        w = _clamp_int(width, 768, 64, 4096)
-        h = _clamp_int(height, 200, 64, 2048)
-        fs = _clamp_int(font_size, 64, 8, 512)
-        sw = _clamp_int(stroke_width, 0, 0, 128)
-        anchor_x = _safe_float(x, 0.5)
-        anchor_y = _safe_float(y, 0.5)
-        align = str(align or "center").strip().lower()
-        if align not in {"left", "center", "right"}:
-            align = "center"
-
-        font_path = _find_font_file_for_preview(safe_family)
-        if font_path:
-            try:
-                font = ImageFont.truetype(font_path, size=fs)
-            except Exception:
-                font = ImageFont.load_default()
-        else:
-            print(f"[Movis Font] Font preview fallback to default bitmap font: {safe_family!r}")
-            font = ImageFont.load_default()
-
-        image = Image.new("RGBA", (w, h), safe_bg_color)
-        draw = ImageDraw.Draw(image)
-        text_value = str(text or "")
-
-        bbox = draw.multiline_textbbox(
-            (0, 0),
-            text_value,
-            font=font,
+        image, _meta = render_font_preview_image(
+            font_family=font_family,
+            font_style=font_style,
+            text=text,
+            font_size=font_size,
+            width=width,
+            height=height,
+            text_color=text_color,
+            bg_color=bg_color,
+            x=x,
+            y=y,
             align=align,
-            stroke_width=sw,
-            spacing=4,
-        )
-        text_w = max(1, int(bbox[2] - bbox[0]))
-        text_h = max(1, int(bbox[3] - bbox[1]))
-
-        px = _position_value_to_pixels(anchor_x, w)
-        py = _position_value_to_pixels(anchor_y, h)
-        if align == "left":
-            draw_x = px
-        elif align == "right":
-            draw_x = px - text_w
-        else:
-            draw_x = px - text_w * 0.5
-        draw_y = py - text_h * 0.5
-
-        draw.multiline_text(
-            (float(draw_x), float(draw_y)),
-            text_value,
-            font=font,
-            fill=safe_text_color,
-            align=align,
-            stroke_width=sw,
-            stroke_fill=safe_stroke_color,
-            spacing=4,
+            stroke_width=stroke_width,
+            stroke_color=stroke_color,
         )
         return (_pil_to_comfy_image(image.convert("RGB")),)
 

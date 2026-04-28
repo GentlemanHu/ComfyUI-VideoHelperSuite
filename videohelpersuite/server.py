@@ -6,6 +6,7 @@ import re
 
 import asyncio
 import av
+import json
 
 from .utils import is_url, get_sorted_dir_files_from_directory, ffmpeg_path, \
         validate_sequence, is_safe_path, strip_path, try_download_video, ENCODE_ARGS
@@ -13,6 +14,44 @@ from comfy.k_diffusion.utils import FolderOfImages
 
 
 web = server.web
+
+
+@server.PromptServer.instance.routes.post("/movis/font_preview")
+async def movis_font_preview(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json body"}, status=400)
+
+    try:
+        # lazy import, avoid unnecessary heavy import at startup
+        from .video_ops import render_font_preview_image, encode_preview_image_data_url
+
+        image, meta = render_font_preview_image(
+            font_family=str(payload.get("font_family", "")),
+            font_style=str(payload.get("font_style", "Regular")),
+            text=str(payload.get("text", "")),
+            font_size=int(payload.get("font_size", 64)),
+            width=int(payload.get("width", 768)),
+            height=int(payload.get("height", 200)),
+            text_color=str(payload.get("text_color", "#ffffff")),
+            bg_color=str(payload.get("bg_color", "#222222")),
+            x=float(payload.get("x", 0.5)),
+            y=float(payload.get("y", 0.5)),
+            align=str(payload.get("align", "center")),
+            stroke_width=int(payload.get("stroke_width", 0)),
+            stroke_color=str(payload.get("stroke_color", "#000000")),
+        )
+        return web.json_response({
+            "image": encode_preview_image_data_url(image),
+            "font_path": meta.get("font_path"),
+            "supports_text": bool(meta.get("supports_text", False)),
+            "missing_chars": list(meta.get("missing_chars", [])),
+            "family": meta.get("family"),
+            "style": meta.get("style"),
+        })
+    except Exception as e:
+        return web.json_response({"error": f"preview render failed: {e}"}, status=500)
 
 @server.PromptServer.instance.routes.get("/vhs/viewvideo")
 @server.PromptServer.instance.routes.get("/viewvideo")

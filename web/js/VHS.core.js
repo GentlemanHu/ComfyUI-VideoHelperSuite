@@ -2111,6 +2111,91 @@ app.registerExtension({
             });
             addVideoPreview(nodeType, false);
             addPreviewOptions(nodeType);
+        } else if (nodeData?.name == "VHS_MOVIS_FontPreview") {
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                const node = this;
+                const img = document.createElement("img");
+                img.style.width = "100%";
+                img.style.maxHeight = "180px";
+                img.style.objectFit = "contain";
+                img.style.background = "#111";
+                img.style.borderRadius = "6px";
+                img.style.border = "1px solid #333";
+
+                const previewWidget = node.addDOMWidget("movis_realtime_preview", "preview", img, {
+                    serialize: false,
+                    hideOnZoom: false,
+                });
+                previewWidget.serialize = false;
+                previewWidget.computeSize = function(width) {
+                    return [width, 190];
+                };
+
+                let timer = null;
+                let seq = 0;
+                const watched = new Set([
+                    "font_family", "font_style", "text", "font_size", "text_color", "bg_color",
+                    "width", "height", "x", "y", "align", "stroke_width", "stroke_color",
+                ]);
+
+                const getWidgetValue = (name, fallback = undefined) => {
+                    const w = node.widgets?.find((x) => x.name === name);
+                    return w ? w.value : fallback;
+                };
+
+                const requestPreview = async () => {
+                    const requestId = ++seq;
+                    const payload = {
+                        font_family: getWidgetValue("font_family", ""),
+                        font_style: getWidgetValue("font_style", "Regular"),
+                        text: getWidgetValue("text", ""),
+                        font_size: Number(getWidgetValue("font_size", 64)),
+                        text_color: String(getWidgetValue("text_color", "#ffffff")),
+                        bg_color: String(getWidgetValue("bg_color", "#222222")),
+                        width: Number(getWidgetValue("width", 768)),
+                        height: Number(getWidgetValue("height", 200)),
+                        x: Number(getWidgetValue("x", 0.5)),
+                        y: Number(getWidgetValue("y", 0.5)),
+                        align: String(getWidgetValue("align", "center")),
+                        stroke_width: Number(getWidgetValue("stroke_width", 0)),
+                        stroke_color: String(getWidgetValue("stroke_color", "#000000")),
+                    };
+
+                    try {
+                        const resp = await fetch(api.apiURL("/movis/font_preview"), {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(payload),
+                        });
+                        if (!resp.ok) {
+                            return;
+                        }
+                        const data = await resp.json();
+                        if (requestId !== seq) {
+                            return;
+                        }
+                        if (data?.image) {
+                            img.src = data.image;
+                            const missing = Array.isArray(data.missing_chars) ? data.missing_chars.join("") : "";
+                            node.setDirtyCanvas(true, true);
+                            img.title = `font=${data?.family || ""} / ${data?.style || ""}\npath=${data?.font_path || ""}\nsupports=${!!data?.supports_text}${missing ? `\nmissing=${missing}` : ""}`;
+                        }
+                    } catch (_e) {
+                        // ignore network errors in UI layer
+                    }
+                };
+
+                const schedulePreview = () => {
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(requestPreview, 300);
+                };
+
+                for (const w of node.widgets || []) {
+                    if (!watched.has(w.name)) continue;
+                    chainCallback(w, "callback", () => schedulePreview());
+                }
+                schedulePreview();
+            });
         } else if (nodeData?.name == "VHS_SaveImageSequence") {
             //Disabled for safety as VHS_SaveImageSequence is not currently merged
             //addDateFormating(nodeType, "directory_name", timestamp_widget=true);
