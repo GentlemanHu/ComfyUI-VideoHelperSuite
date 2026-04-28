@@ -2201,7 +2201,7 @@ app.registerExtension({
                 const node = this;
                 const img = document.createElement("img");
                 img.style.width = "100%";
-                img.style.maxHeight = "190px";
+                img.style.maxHeight = "240px";
                 img.style.objectFit = "contain";
                 img.style.background = "#111";
                 img.style.borderRadius = "6px";
@@ -2213,7 +2213,7 @@ app.registerExtension({
                 });
                 previewWidget.serialize = false;
                 previewWidget.computeSize = function(width) {
-                    return [width, 200];
+                    return [width, 250];
                 };
 
                 let timer = null;
@@ -2244,8 +2244,8 @@ app.registerExtension({
                         custom_override_json: String(getWidgetValue("custom_override_json", "")),
                         x: Number(getWidgetValue("position_x", 0.5)),
                         y: Number(getWidgetValue("position_y", 0.5)),
-                        width: 1200,
-                        height: 220,
+                        width: 1400,
+                        height: 260,
                         bg_color: "#222222",
                         text: "自动字幕预览 AutoCaption Preview 中文 English 123",
                     };
@@ -2262,7 +2262,8 @@ app.registerExtension({
                         if (data?.image) {
                             img.src = data.image;
                             const resolved = data?.resolved || {};
-                            img.title = `font=${data?.family || ""}/${data?.style || ""}\nsize=${resolved.font_size || ""}\ncolor=${resolved.text_color || ""}\nalign=${resolved.align || ""}\npath=${data?.font_path || ""}`;
+                            const missing = Array.isArray(data?.missing_chars) ? data.missing_chars.join("") : "";
+                            img.title = `font=${data?.family || ""}/${data?.style || ""}\nsize=${resolved.font_size || ""}\ncolor=${resolved.text_color || ""}\nalign=${resolved.align || ""}\nfit_size=${data?.fit_font_size || ""}\npath=${data?.font_path || ""}${missing ? `\nmissing=${missing}` : ""}`;
                             node.setDirtyCanvas(true, true);
                         }
                     } catch (_e) {

@@ -493,16 +493,47 @@ def render_font_preview_image(
 
     image = Image.new("RGBA", (w, h), safe_bg_color)
     draw = ImageDraw.Draw(image)
-    bbox = draw.multiline_textbbox(
+
+    spacing = 4
+    pad = max(8, int(round(fs * 0.15)) + sw)
+    avail_w = max(1, w - pad * 2)
+    avail_h = max(1, h - pad * 2)
+
+    # 预览避免“文字被截断”：自动缩放字体直到放进可视区域。
+    fit_font = font
+    fit_bbox = draw.multiline_textbbox(
         (0, 0),
         text_value,
-        font=font,
+        font=fit_font,
         align=safe_align,
         stroke_width=sw,
-        spacing=4,
+        spacing=spacing,
     )
-    text_w = max(1, int(bbox[2] - bbox[0]))
-    text_h = max(1, int(bbox[3] - bbox[1]))
+    fit_size = fs
+    if font_path:
+        for try_size in range(fs, 7, -2):
+            try:
+                test_font = ImageFont.truetype(font_path, size=try_size)
+            except Exception:
+                break
+            test_bbox = draw.multiline_textbbox(
+                (0, 0),
+                text_value,
+                font=test_font,
+                align=safe_align,
+                stroke_width=sw,
+                spacing=spacing,
+            )
+            test_w = max(1, int(test_bbox[2] - test_bbox[0]))
+            test_h = max(1, int(test_bbox[3] - test_bbox[1]))
+            if test_w <= avail_w and test_h <= avail_h:
+                fit_font = test_font
+                fit_bbox = test_bbox
+                fit_size = try_size
+                break
+
+    text_w = max(1, int(fit_bbox[2] - fit_bbox[0]))
+    text_h = max(1, int(fit_bbox[3] - fit_bbox[1]))
 
     px = _position_value_to_pixels(anchor_x, w)
     py = _position_value_to_pixels(anchor_y, h)
@@ -514,15 +545,25 @@ def render_font_preview_image(
         draw_x = px - text_w * 0.5
     draw_y = py - text_h * 0.5
 
+    # 使用 bbox 偏移做边界保护，防止 stroke/字形外扩导致被裁切。
+    min_x = pad - float(fit_bbox[0])
+    max_x = (w - pad) - float(fit_bbox[2])
+    min_y = pad - float(fit_bbox[1])
+    max_y = (h - pad) - float(fit_bbox[3])
+    if min_x <= max_x:
+        draw_x = max(min_x, min(draw_x, max_x))
+    if min_y <= max_y:
+        draw_y = max(min_y, min(draw_y, max_y))
+
     draw.multiline_text(
         (float(draw_x), float(draw_y)),
         text_value,
-        font=font,
+        font=fit_font,
         fill=safe_text_color,
         align=safe_align,
         stroke_width=sw,
         stroke_fill=safe_stroke_color,
-        spacing=4,
+        spacing=spacing,
     )
 
     meta = {
@@ -532,6 +573,8 @@ def render_font_preview_image(
         "cmap_count": int(report.get("cmap_count", 0)),
         "family": safe_family,
         "style": safe_style,
+        "fit_font_size": int(fit_size),
+        "draw_padding": int(pad),
     }
     return image, meta
 
