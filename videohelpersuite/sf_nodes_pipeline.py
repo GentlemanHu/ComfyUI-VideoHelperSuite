@@ -740,13 +740,17 @@ class SF_AddDepthFlow:
                 "ssaa": ("FLOAT", {
                     "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.25,
                 }),
-                "audio_reactive": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "用频谱低频驱动 parallax 强度",
+                "audio_preset": (["none", "subtle_pulse", "heartbeat_zoom", "aggressive_bounce", "chaotic_shake", "custom"], {
+                    "default": "none",
+                    "tooltip": "音频驱动预设模式",
                 }),
-                "audio_reactive_scale": ("FLOAT", {
-                    "default": 1.5, "min": 0.1, "max": 5.0, "step": 0.1,
-                    "tooltip": "音频驱动 parallax 的缩放系数",
+                "audio_target": (["zoom", "height", "both", "isometric", "phase"], {
+                    "default": "both",
+                    "tooltip": "自定义模式下的音频驱动目标",
+                }),
+                "audio_scale": ("FLOAT", {
+                    "default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1,
+                    "tooltip": "音频驱动强度缩放",
                 }),
             },
         }
@@ -761,7 +765,7 @@ class SF_AddDepthFlow:
             depth_map=None, depth_estimator="da2",
             movement_smooth=True, movement_loop=True,
             movement_reverse=False, movement_phase=0.0,
-            ssaa=1.0, audio_reactive=False, audio_reactive_scale=1.5):
+            ssaa=1.0, audio_preset="none", audio_target="both", audio_scale=1.5):
         pipe = _clone_pipeline(pipeline)
 
         if pipe["background"] is None:
@@ -801,8 +805,9 @@ class SF_AddDepthFlow:
                 "movement_phase": movement_phase,
                 "ssaa": ssaa,
                 "depth_estimator": depth_estimator,
-                "audio_reactive": audio_reactive,
-                "audio_reactive_scale": audio_reactive_scale,
+                "audio_preset": audio_preset,
+                "audio_target": audio_target,
+                "audio_scale": audio_scale,
             },
             "_src_img": src_img,
             "_depth_np": depth_np,
