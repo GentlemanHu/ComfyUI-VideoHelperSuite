@@ -468,13 +468,19 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             import depthflow
             from depthflow.scene import DepthScene
             from shaderflow.scene import WindowBackend
+            from shaderflow.message import ShaderMessage
             
             scene = DepthScene(backend=WindowBackend.Headless)
             # Set raw data before initialize so _load_inputs works
             scene._raw_image = src_img
             scene._raw_depth = depth_np
-            # Full lifecycle: initialize() → build() → setup() → compile shader
+            
+            # Exact initialization sequence identical to ShaderScene.main()
             scene.initialize()
+            scene.relay(ShaderMessage.Shader.Compile)
+            for module in scene.modules:
+                module.setup()
+                
             renderer = ("opengl", scene)
             logger.info("[SF] DepthFlow: Native OpenGL initialized successfully")
         except Exception as e:
