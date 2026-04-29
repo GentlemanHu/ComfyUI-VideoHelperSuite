@@ -3072,3 +3072,15 @@ if HAS_CUSTOM_FEATURES:
         print(f"ShaderFlow Pipeline: {len(SFP_CM)} nodes registered")
     except Exception as e:
         print(f"ShaderFlow Pipeline nodes not available: {e}")
+
+    # Try to add DepthFlow Pipeline nodes (modular one-wire chain)
+    try:
+        from .df_nodes_pipeline import (
+            NODE_CLASS_MAPPINGS as DFP_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as DFP_DN,
+        )
+        NODE_CLASS_MAPPINGS.update(DFP_CM)
+        NODE_DISPLAY_NAME_MAPPINGS.update(DFP_DN)
+        print(f"DepthFlow Pipeline: {len(DFP_CM)} nodes registered")
+    except Exception as e:
+        print(f"DepthFlow Pipeline nodes not available: {e}")
