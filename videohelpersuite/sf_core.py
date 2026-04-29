@@ -485,6 +485,57 @@ def _estimate_depth_simple(img_np, estimator: str = "da2"):
         return 1.0 - (gray / max(gray.max(), 1.0))
 
 
+def _depthflow_quality_settings(params: dict) -> dict:
+    """Resolve DepthFlow render quality knobs from a small profile plus overrides."""
+    profile = params.get("quality_profile", "film")
+    table = {
+        "fast": {"quality_pct": 70, "enable_inpaint": False, "inpaint_threshold": 3.5},
+        "balanced": {"quality_pct": 85, "enable_inpaint": True, "inpaint_threshold": 2.8},
+        "film": {"quality_pct": 96, "enable_inpaint": False, "inpaint_threshold": 2.2},
+    }
+    resolved = dict(table.get(profile, table["film"]))
+    if "enable_inpaint" in params:
+        resolved["enable_inpaint"] = bool(params.get("enable_inpaint"))
+    if "inpaint_threshold" in params:
+        resolved["inpaint_threshold"] = float(params.get("inpaint_threshold"))
+    if "quality_pct" in params:
+        resolved["quality_pct"] = float(params.get("quality_pct"))
+    return resolved
+
+
+def _normalize_depth_map(depth_np, src_img=None, sigma: float = 0.0):
+    """Normalize optional depth map without destructive dilation.
+
+    DepthFlow's reference GLSL path does not dilate depth.  Dilation makes
+    foreground silhouettes bleed into background, which is one root cause of
+    fuzzy/tearing edges.  This helper only normalizes and optionally applies a
+    light edge-preserving/gaussian smooth when explicitly requested.
+    """
+    depth = np.asarray(depth_np, dtype=np.float32)
+    if depth.ndim == 3:
+        depth = depth[:, :, 0]
+    finite = np.isfinite(depth)
+    if not finite.all():
+        depth = np.where(finite, depth, 0.0).astype(np.float32)
+    dmin, dmax = float(depth.min()), float(depth.max())
+    if dmax > dmin:
+        depth = (depth - dmin) / (dmax - dmin)
+    else:
+        depth = np.zeros_like(depth, dtype=np.float32)
+    if sigma and sigma > 0:
+        try:
+            import cv2
+            if src_img is not None and hasattr(cv2, "ximgproc"):
+                guide = np.asarray(src_img, dtype=np.uint8)
+                depth = cv2.ximgproc.guidedFilter(guide, depth, radius=max(2, int(sigma * 4)), eps=1e-3)
+            else:
+                k = max(3, int(sigma * 6) | 1)
+                depth = cv2.GaussianBlur(depth, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REPLICATE)
+        except Exception:
+            pass
+    return np.clip(depth, 0.0, 1.0).astype(np.float32)
+
+
 def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
                             w: int, h: int, fps: float,
                             canvas: dict):
@@ -506,6 +557,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             depth_np = cv2.resize(depth_np, (src_img.shape[1], src_img.shape[0]))
         except ImportError:
             pass
+    depth_np = _normalize_depth_map(depth_np, src_img, params.get("depth_smooth_sigma", 0.0))
     layer["_depth_np"] = depth_np
 
     # Initialize renderer fallback chain
@@ -517,41 +569,70 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
         renderer = None
         cuda_mod = None
         
-        # 1. Try Native ShaderFlow OpenGL (with full lifecycle)
-        try:
-            _setup_env_paths()
-            import depthflow
-            from depthflow.scene import DepthScene
-            from shaderflow.scene import WindowBackend
-            from shaderflow.message import ShaderMessage
-            
-            scene = DepthScene(backend=WindowBackend.Headless)
-            # Set raw data before initialize so _load_inputs works
-            scene._raw_image = src_img
-            scene._raw_depth = depth_np
-            
-            # Exact initialization sequence identical to ShaderScene.main()
-            scene.initialize()
-            scene.relay(ShaderMessage.Shader.Compile)
-            for module in scene.modules:
-                module.setup()
-                
-            renderer = ("opengl", scene)
-            logger.info("[SF] DepthFlow: Native OpenGL initialized successfully")
-        except Exception as e:
-            logger.info(f"[SF] DepthFlow: Native OpenGL unavailable ({e}), trying CUDA...")
-        
-        # 2. Try CUDA — DepthFlow's official non-GUI renderer (same quality as OpenGL)
-        if renderer is None:
-            from .df_nodes_pipeline import _find_cuda_renderer
-            cuda_mod = _find_cuda_renderer()
-            if cuda_mod is not None and cuda_mod.is_available():
-                renderer = ("cuda", cuda_mod.CudaDepthFlowRenderer(img_f, dep_f))
-                logger.info("[SF] DepthFlow: CUDA renderer initialized (official quality)")
-            else:
-                logger.warning("[SF] DepthFlow: CUDA unavailable, using CPU fallback")
+        backend_policy = params.get("backend_policy", "cuda_first")
+        allow_cpu = backend_policy in ("auto", "allow_cpu")
+        backend_order = {
+            "cuda_first": ("cuda", "opengl"),
+            "opengl_first": ("opengl", "cuda"),
+            "cuda_only": ("cuda",),
+            "opengl_only": ("opengl",),
+            "auto": ("cuda", "opengl"),
+            "allow_cpu": ("cuda", "opengl", "cpu"),
+        }.get(backend_policy, ("cuda", "opengl"))
+
+        for backend_name in backend_order:
+            if backend_name == "cuda" and renderer is None:
+                from .df_nodes_pipeline import _find_cuda_renderer
+                cuda_mod = _find_cuda_renderer()
+                if cuda_mod is not None and cuda_mod.is_available():
+                    q = _depthflow_quality_settings(params)
+                    renderer = ("cuda", cuda_mod.CudaDepthFlowRenderer(
+                        img_f, dep_f,
+                        depth_post_process=bool(params.get("depth_smooth_sigma", 0.0) > 0),
+                        depth_smooth_sigma=float(params.get("depth_smooth_sigma", 0.0)),
+                    ))
+                    logger.info(
+                        f"[SF] DepthFlow: CUDA renderer initialized "
+                        f"(quality={q['quality_pct']}, inpaint={q['enable_inpaint']})"
+                    )
+                continue
+
+            if backend_name == "opengl" and renderer is None:
+                try:
+                    _setup_env_paths()
+                    import depthflow
+                    from depthflow.scene import DepthScene
+                    from shaderflow.scene import WindowBackend
+                    from shaderflow.message import ShaderMessage
+
+                    scene = DepthScene(backend=WindowBackend.Headless)
+                    scene._raw_image = src_img
+                    scene._raw_depth = depth_np
+
+                    scene.initialize()
+                    scene.relay(ShaderMessage.Shader.Compile)
+                    for module in scene.modules:
+                        module.setup()
+
+                    renderer = ("opengl", scene)
+                    logger.info("[SF] DepthFlow: Native OpenGL initialized successfully")
+                except Exception as e:
+                    logger.info(f"[SF] DepthFlow: Native OpenGL unavailable ({e})")
+                continue
+
+            if backend_name == "cpu" and renderer is None:
                 renderer = ("cpu", None)
-                
+
+        if renderer is None:
+            if not allow_cpu:
+                raise RuntimeError(
+                    "DepthFlow high-quality backend unavailable. "
+                    f"backend_policy={backend_policy}; install/fix CUDA or OpenGL, "
+                    "or set backend_policy=allow_cpu to permit low-quality fallback."
+                )
+            logger.warning("[SF] DepthFlow: high-quality backend unavailable, using CPU fallback")
+            renderer = ("cpu", None)
+
         layer["_renderer"] = renderer
         layer["_cuda_mod"] = cuda_mod
 
@@ -738,10 +819,14 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
     ssaa_w = int(w * ssaa)
     ssaa_h = int(h * ssaa)
     
+    q = _depthflow_quality_settings(params)
     eff_aa = True if ssaa <= 1.0 else False
     frame_tensor = renderer.render_frame(
-        ssaa_w, ssaa_h, state, quality_pct=90,
-        enable_inpaint=False, enable_aa=eff_aa
+        ssaa_w, ssaa_h, state, quality_pct=q["quality_pct"],
+        enable_inpaint=q["enable_inpaint"],
+        inpaint_threshold=q["inpaint_threshold"],
+        inpaint_mode="soften" if q["enable_inpaint"] else "off",
+        enable_aa=eff_aa,
     )
     
     # render_frame() returns (H,W,3) uint8 tensor — DO NOT multiply by 255!

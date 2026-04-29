@@ -890,6 +890,26 @@ class SF_AddDepthFlow:
                 "ssaa": ("FLOAT", {
                     "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.25,
                 }),
+                "quality_profile": (["fast", "balanced", "film"], {
+                    "default": "film",
+                    "tooltip": "DepthFlow CUDA/OpenGL质量档；film默认开启更高质量与边缘软化",
+                }),
+                "backend_policy": (["auto", "cuda_first", "opengl_first", "cuda_only", "opengl_only", "allow_cpu"], {
+                    "default": "cuda_first",
+                    "tooltip": "渲染后端策略；默认优先CUDA并禁止静默CPU低质回退",
+                }),
+                "enable_inpaint": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "非GLSL边缘软化；关闭时CUDA更严格对齐DepthFlow OpenGL/GLSL",
+                }),
+                "inpaint_threshold": ("FLOAT", {
+                    "default": 2.2, "min": 1.0, "max": 8.0, "step": 0.1,
+                    "tooltip": "边缘软化阈值；越低越强",
+                }),
+                "depth_smooth_sigma": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 3.0, "step": 0.1,
+                    "tooltip": "可选深度图高斯平滑；0保持DepthFlow原生一致性",
+                }),
                 "audio_preset": (["none", "subtle_pulse", "heartbeat_zoom", "aggressive_bounce", "chaotic_shake", "custom"], {
                     "default": "none",
                     "tooltip": "音频驱动预设模式",
@@ -915,7 +935,9 @@ class SF_AddDepthFlow:
             depth_map=None, depth_estimator="da2",
             movement_smooth=True, movement_loop=True,
             movement_reverse=False, movement_phase=0.0,
-            ssaa=1.0, audio_preset="none", audio_target="both", audio_scale=1.5):
+            ssaa=1.0, quality_profile="film", backend_policy="cuda_first",
+            enable_inpaint=False, inpaint_threshold=2.2, depth_smooth_sigma=0.0,
+            audio_preset="none", audio_target="both", audio_scale=1.5):
         pipe = _clone_pipeline(pipeline)
 
         if pipe["background"] is None:
@@ -954,6 +976,11 @@ class SF_AddDepthFlow:
                 "movement_reverse": movement_reverse,
                 "movement_phase": movement_phase,
                 "ssaa": ssaa,
+                "quality_profile": quality_profile,
+                "backend_policy": backend_policy,
+                "enable_inpaint": enable_inpaint,
+                "inpaint_threshold": inpaint_threshold,
+                "depth_smooth_sigma": depth_smooth_sigma,
                 "depth_estimator": depth_estimator,
                 "audio_preset": audio_preset,
                 "audio_target": audio_target,

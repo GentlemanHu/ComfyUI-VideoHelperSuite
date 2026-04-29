@@ -335,14 +335,15 @@ class DF_Render:
                 "height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
                 "fps": ("INT", {"default": 30, "min": 1, "max": 120}),
                 "duration": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 120.0, "step": 0.1}),
-                "ssaa": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.25}),
-                "quality": ("INT", {"default": 80, "min": 1, "max": 100}),
+                "ssaa": ("FLOAT", {"default": 1.25, "min": 0.5, "max": 2.0, "step": 0.25}),
+                "quality": ("INT", {"default": 96, "min": 1, "max": 100}),
                 "codec": (["h264", "h264-nvenc", "h265", "h265-nvenc"], {"default": "h264"}),
                 "output_format": (["mp4", "mkv", "webm"], {"default": "mp4"}),
                 "output_prefix": ("STRING", {"default": "df_pipe_"}),
                 "output_frames": ("BOOLEAN", {"default": False,
                                               "tooltip": "同时输出 IMAGE tensor（占内存）"}),
                 "enable_inpaint": ("BOOLEAN", {"default": False}),
+                "inpaint_threshold": ("FLOAT", {"default": 2.2, "min": 1.0, "max": 8.0, "step": 0.1}),
                 "enable_aa": ("BOOLEAN", {"default": True}),
             },
         }
@@ -356,7 +357,7 @@ class DF_Render:
     def render(self, pipeline, width=0, height=0, fps=30, duration=5.0,
                ssaa=1.0, quality=80, codec="h264", output_format="mp4",
                output_prefix="df_pipe_", output_frames=False,
-               enable_inpaint=False, enable_aa=True):
+               enable_inpaint=False, inpaint_threshold=2.2, enable_aa=True):
         import folder_paths
         from datetime import datetime
         from comfy.utils import ProgressBar
@@ -392,7 +393,7 @@ class DF_Render:
             frames_tensor = self._render_cuda(
                 cuda_mod, img_np, depth_np, rw, rh, fps, duration, ssaa,
                 quality, codec, output_format, out_path, total_frames,
-                motion, state_cfg, postfx, enable_inpaint, enable_aa,
+                motion, state_cfg, postfx, enable_inpaint, inpaint_threshold, enable_aa,
                 output_frames,
             )
         else:
@@ -417,7 +418,7 @@ class DF_Render:
     def _render_cuda(self, cuda_mod, img_np, depth_np, rw, rh, fps, duration,
                      ssaa, quality, codec, fmt, out_path, total_frames,
                      motion, state_cfg, postfx,
-                     enable_inpaint, enable_aa, output_frames):
+                     enable_inpaint, inpaint_threshold, enable_aa, output_frames):
         """O(1) memory: render_frame() per frame → ffmpeg pipe."""
         from comfy.utils import ProgressBar
         import subprocess, shutil, time
@@ -494,7 +495,10 @@ class DF_Render:
                 eff_aa = enable_aa and (ssaa <= 1.0)
                 frame = renderer.render_frame(
                     ssaa_w, ssaa_h, state, quality,
-                    enable_inpaint=enable_inpaint, enable_aa=eff_aa,
+                    enable_inpaint=enable_inpaint,
+                    inpaint_threshold=inpaint_threshold,
+                    inpaint_mode="soften" if enable_inpaint else "off",
+                    enable_aa=eff_aa,
                 )
                 proc.stdin.write(frame.numpy().tobytes())
 
