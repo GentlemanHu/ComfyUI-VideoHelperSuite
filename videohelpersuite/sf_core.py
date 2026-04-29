@@ -600,7 +600,20 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
             if hasattr(action, 'steady'): action.steady = params.get("steady_depth", 0.3)
             if hasattr(action, 'isometric'): action.isometric = params.get("isometric", 0.6)
             
-        action.apply(state, tau)
+        try:
+            action.apply(state, tau)
+        except TypeError as e:
+            # Workaround for DepthFlow native bug where Vertical/Horizontal try to mutate a tuple:
+            # e.g., state.offset[1] = self.wave.at(time)
+            if "tuple" in str(e):
+                if move_cls.__name__ == "Vertical":
+                    state.offset = (state.offset[0], action.wave.at(tau))
+                elif move_cls.__name__ == "Horizontal":
+                    state.offset = (action.wave.at(tau), state.offset[1])
+                else:
+                    raise e
+            else:
+                raise e
         
         # 3. Global parameters not mutated by specific native offset Actions
         state.steady = params.get("steady_depth", 0.3)
