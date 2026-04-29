@@ -648,8 +648,8 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     _apply_audio_preset(state, audio_val, preset, params)
 
     scene.state = state
-    # Resize resolution
-    scene.resolution = (w, h)
+    # Resize resolution by explicitly using keyword args to bypass upstream `resolution` setter unpacking bug
+    scene.resize(width=w, height=h)
     scene.next(0.0)
     
     frame_np = scene.screenshot()
