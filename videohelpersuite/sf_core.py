@@ -4,12 +4,8 @@ ShaderFlow Modular Core — Type definitions, logging, layer rendering.
 All SF_* types are lightweight dicts (recipes/descriptors).
 Actual rendering happens only in SF_RenderToVideo via render_layer_frame().
 """
-import os
 import math
 import logging
-import hashlib
-import tempfile
-import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -31,6 +27,7 @@ T_SF_CURVE = "SF_CURVE"
 T_SF_MIDI = "SF_MIDI"
 T_SF_CANVAS = "SF_CANVAS"
 T_SF_LAYER = "SF_LAYER"
+T_SF_PIPELINE = "SF_PIPELINE"
 
 
 # ---------------------------------------------------------------------------

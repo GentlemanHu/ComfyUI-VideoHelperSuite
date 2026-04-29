@@ -3060,3 +3060,15 @@ if HAS_CUSTOM_FEATURES:
         print(f"ShaderFlow Modular: {len(SFI_CM)+len(SFA_CM)+len(SFL_CM)+len(SFO_CM)} nodes registered")
     except Exception as e:
         print(f"ShaderFlow Modular nodes not available: {e}")
+
+    # Try to add ShaderFlow Pipeline nodes (streamlined one-wire chain)
+    try:
+        from .sf_nodes_pipeline import (
+            NODE_CLASS_MAPPINGS as SFP_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SFP_DN,
+        )
+        NODE_CLASS_MAPPINGS.update(SFP_CM)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SFP_DN)
+        print(f"ShaderFlow Pipeline: {len(SFP_CM)} nodes registered")
+    except Exception as e:
+        print(f"ShaderFlow Pipeline nodes not available: {e}")
