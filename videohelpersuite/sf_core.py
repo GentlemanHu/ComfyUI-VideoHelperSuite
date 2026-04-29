@@ -369,6 +369,32 @@ def _apply_motion_blur_frame(layer: Dict, frame_idx: int) -> np.ndarray:
 # DepthFlow layer renderer
 # ---------------------------------------------------------------------------
 
+
+def _setup_env_paths():
+    """Inject DepthFlow and ShaderFlow virtual environments into sys.path."""
+    import sys
+    from pathlib import Path
+    
+    # Check ComfyUI/own/
+    base_dir = Path(__file__).resolve().parent.parent.parent.parent
+    
+    projects = ["DepthFlow", "ShaderFlow"]
+    for proj in projects:
+        proj_dir = base_dir / proj
+        if not proj_dir.is_dir():
+            continue
+            
+        # 1. Check local venv
+        venv_lib = list(proj_dir.glob('.venv*/lib/python*/site-packages'))
+        if venv_lib:
+            if str(venv_lib[0]) not in sys.path:
+                sys.path.insert(0, str(venv_lib[0]))
+                
+        # 2. Add project root itself
+        if str(proj_dir) not in sys.path:
+            sys.path.insert(0, str(proj_dir))
+
+
 def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
                             w: int, h: int, fps: float,
                             canvas: dict):
@@ -379,7 +405,6 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
     total = get_total_frames(canvas)
     duration = canvas.get("duration", total / max(fps, 1.0))
     import numpy as np
-    from videohelpersuite.utils import logger
 
     # Ensure shape alignment (Sanity Check)
     if depth_np is None:
@@ -404,6 +429,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
         
         # 1. Try Native ShaderFlow OpenGL
         try:
+            _setup_env_paths()
             import depthflow
             from depthflow.scene import DepthScene
             from shaderflow.scene import WindowBackend
@@ -420,7 +446,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
         
         # 2. Try CUDA Fallback
         if renderer is None:
-            from videohelpersuite.df_nodes_pipeline import _find_cuda_renderer
+            from .df_nodes_pipeline import _find_cuda_renderer
             cuda_mod = _find_cuda_renderer()
             if cuda_mod is not None and cuda_mod.is_available():
                 renderer = ("cuda", cuda_mod.CudaDepthFlowRenderer(img_f, dep_f))
@@ -492,7 +518,8 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     try:
         from depthflow.state import DepthState
         from depthflow.animation import DepthAnimation
-        import depthflow.animation as dfa
+        _setup_env_paths()
+            import depthflow.animation as dfa
     except ImportError:
         return np.zeros((h, w, 3), dtype=np.uint8)
 
