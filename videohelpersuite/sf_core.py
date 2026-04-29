@@ -379,7 +379,7 @@ def _setup_env_paths():
     from pathlib import Path
     
     # --- 1. Linux EGL Environment Setup ---
-    if platform.system() != "Windows":
+    if platform.system() == "Linux":
         os.environ["PYOPENGL_PLATFORM"] = "egl"
         
         # Check NVIDIA GPU
@@ -741,7 +741,7 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
     eff_aa = True if ssaa <= 1.0 else False
     frame_tensor = renderer.render_frame(
         ssaa_w, ssaa_h, state, quality_pct=90,
-        enable_inpaint=True, enable_aa=eff_aa
+        enable_inpaint=False, enable_aa=eff_aa
     )
     
     # render_frame() returns (H,W,3) uint8 tensor — DO NOT multiply by 255!
