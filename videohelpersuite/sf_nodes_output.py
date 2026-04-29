@@ -114,9 +114,30 @@ def _prepare_layer_for_render(layer: Dict, canvas: Dict):
 
 def _cleanup_layer(layer: Dict):
     """Release runtime resources after rendering."""
+    import gc
     if layer.get("type") == "glsl" and layer.get("_glsl_renderer"):
         layer["_glsl_renderer"].release()
         layer["_glsl_renderer"] = None
+        
+    if layer.get("type") == "depthflow" and layer.get("_renderer"):
+        renderer_type, renderer_obj = layer["_renderer"]
+        if renderer_type == "opengl" and renderer_obj is not None:
+            # Force explicit GC for ShaderScene to trigger __del__ which calls opengl.release() and window.destroy()
+            del renderer_obj
+        elif renderer_type == "cuda" and renderer_obj is not None:
+            # Free PyTorch CUDA renderer
+            del renderer_obj
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+                
+        layer["_renderer"] = None
+        layer["_cuda_mod"] = None
+        gc.collect()
+
     if "source_layer" in layer:
         _cleanup_layer(layer["source_layer"])
 
