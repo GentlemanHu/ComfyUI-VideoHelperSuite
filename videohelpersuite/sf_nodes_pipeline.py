@@ -59,7 +59,7 @@ def _make_pipeline(canvas, audio=None, midi=None, spectrum=None,
 
 def _clone_pipeline(pipe):
     """Shallow-clone pipeline so upstream nodes aren't mutated."""
-    return {
+    clone = {
         "canvas": dict(pipe["canvas"]),
         "audio": pipe.get("audio"),
         "midi": pipe.get("midi"),
@@ -67,6 +67,101 @@ def _clone_pipeline(pipe):
         "background": pipe.get("background"),
         "layers": list(pipe.get("layers", [])),
     }
+    if "audio_rms" in pipe:
+        clone["audio_rms"] = pipe["audio_rms"]
+    return clone
+
+
+def _composite_all_layers(layers, frame_idx, canvas, w, h):
+    """Render all layers and composite them together via additive blending.
+
+    Rendering order: first layer = bottom, last layer = top.
+    DepthFlow layers are rendered as full backgrounds.
+    Visualizer layers (bars/radial/waveform) are additively blended on top.
+    Post-process layers (color_grade/motion_blur) wrap whatever came before.
+    """
+    if not layers:
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    # Classify layers into base and overlay
+    base_frame = None
+    post_fx_layers = []
+
+    for layer in layers:
+        ltype = layer.get("type", "")
+
+        # Post-process layers need special handling — they wrap prior result
+        if ltype in ("color_grade", "motion_blur"):
+            post_fx_layers.append(layer)
+            continue
+
+        # Render this layer
+        rendered = render_layer_frame(layer, frame_idx, canvas)
+
+        # Ensure correct size
+        if rendered.shape[0] != h or rendered.shape[1] != w:
+            try:
+                import cv2
+                rendered = cv2.resize(rendered, (w, h))
+            except ImportError:
+                padded = np.zeros((h, w, 3), dtype=np.uint8)
+                rh, rw = min(rendered.shape[0], h), min(rendered.shape[1], w)
+                padded[:rh, :rw] = rendered[:rh, :rw]
+                rendered = padded
+
+        if base_frame is None:
+            # First layer becomes the base
+            base_frame = rendered
+        else:
+            # Composite: additive blend (visualizer on top of depthflow)
+            # Use screen-like blend: max of each pixel, preserving brightness
+            base_f = base_frame.astype(np.float32)
+            over_f = rendered.astype(np.float32)
+            # Screen blend: 1 - (1-A)*(1-B)  preserves detail from both layers
+            blended = 255.0 - ((255.0 - base_f) * (255.0 - over_f) / 255.0)
+            base_frame = np.clip(blended, 0, 255).astype(np.uint8)
+
+    if base_frame is None:
+        base_frame = np.zeros((h, w, 3), dtype=np.uint8)
+
+    # Apply post-process FX on the composited result
+    # (color_grade and motion_blur act on the full composite)
+    for fx_layer in post_fx_layers:
+        params = fx_layer.get("params", {})
+        if fx_layer["type"] == "color_grade":
+            img = base_frame.astype(np.float32) / 255.0
+            exposure = params.get("exposure", 0.0)
+            if exposure != 0.0:
+                img = img * (2.0 ** exposure)
+            temp = params.get("temperature", 0.0)
+            tint = params.get("tint", 0.0)
+            if temp != 0.0 or tint != 0.0:
+                img[:, :, 0] += temp * 0.1
+                img[:, :, 1] -= tint * 0.05
+                img[:, :, 2] -= temp * 0.1
+            contrast = params.get("contrast", 1.0)
+            if contrast != 1.0:
+                img = (img - 0.5) * contrast + 0.5
+            saturation = params.get("saturation", 1.0)
+            if saturation != 1.0:
+                luma = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+                luma = luma[:, :, np.newaxis]
+                img = luma + (img - luma) * saturation
+            gamma = params.get("gamma", 1.0)
+            if gamma != 1.0:
+                img = np.clip(img, 0, None) ** (1.0 / gamma)
+            base_frame = np.clip(img * 255, 0, 255).astype(np.uint8)
+        elif fx_layer["type"] == "motion_blur":
+            strength = params.get("strength", 0.3)
+            accum = fx_layer.get("_accum")
+            if accum is None or accum.shape != base_frame.shape:
+                fx_layer["_accum"] = base_frame.astype(np.float32)
+            else:
+                blended = accum * strength + base_frame.astype(np.float32) * (1.0 - strength)
+                fx_layer["_accum"] = blended
+                base_frame = np.clip(blended, 0, 255).astype(np.uint8)
+
+    return base_frame
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +365,30 @@ class SF_AddSpectrum:
                     dynamics[bi].target = bins_data[fi, bi]
                     bins_data[fi, bi] = max(0.0, float(dynamics[bi].next(dt)))
             spectrum["bins"] = bins_data
+
+        if pbar:
+            pbar.update_absolute(90)
+
+        # Compute per-frame RMS for audio-reactive DepthFlow
+        audio_data = pipe["audio"]
+        samples = audio_data["samples"]
+        sr = audio_data["sr"]
+        total_frames = max(1, int(pipe["canvas"]["duration"] * fps))
+        rms_arr = np.zeros(total_frames, dtype=np.float32)
+        hop = max(1, int(sr / fps))
+        mono = samples[0] if samples.ndim == 2 else samples
+        for fi in range(total_frames):
+            start = fi * hop
+            end = min(start + hop, len(mono))
+            if start < len(mono):
+                chunk = mono[start:end]
+                rms_arr[fi] = float(np.sqrt(np.mean(chunk ** 2)))
+        # Normalize to 0..1
+        rms_max = rms_arr.max()
+        if rms_max > 0:
+            rms_arr = rms_arr / rms_max
+        pipe["audio_rms"] = rms_arr
+        logger.info(f"[SF Pipeline] Computed audio_rms: {total_frames} frames, peak={rms_max:.4f}")
 
         if pbar:
             pbar.update_absolute(100)
@@ -522,7 +641,7 @@ class SF_PipelineRender:
         import tempfile
 
         pipe = pipeline
-        canvas = pipe["canvas"]
+        canvas = dict(pipe["canvas"])
         w, h = canvas["width"], canvas["height"]
         fps = canvas["fps"]
         total = get_total_frames(canvas)
@@ -530,15 +649,19 @@ class SF_PipelineRender:
         if not pipe["layers"]:
             raise ValueError("Pipeline has no layers. Add a visualizer first.")
 
-        # Use the last layer
-        layer = pipe["layers"][-1]
+        # Inject audio_rms into canvas for audio-reactive layers
+        if "audio_rms" in pipe:
+            canvas["audio_rms"] = pipe["audio_rms"]
 
+        all_layers = pipe["layers"]
+        layer_types = [l.get('type', '?') for l in all_layers]
         logger.info(f"[SF Pipeline] ═══ Render Start ═══")
-        logger.info(f"[SF Pipeline] {w}x{h}@{fps}fps, {total}f, layer={layer.get('type')}")
+        logger.info(f"[SF Pipeline] {w}x{h}@{fps}fps, {total}f, layers={layer_types}")
 
-        # Prepare layer (GLSL init, key dynamics, etc.)
+        # Prepare ALL layers (GLSL init, key dynamics, etc.)
         from .sf_nodes_output import _prepare_layer_for_render, _cleanup_layer
-        _prepare_layer_for_render(layer, canvas)
+        for layer in all_layers:
+            _prepare_layer_for_render(layer, canvas)
 
         # Resolve audio
         audio_wav = None
@@ -567,7 +690,7 @@ class SF_PipelineRender:
             out_dir = folder_paths.get_output_directory()
         except ImportError:
             out_dir = tempfile.gettempdir()
-        lhash = hashlib.md5(str(layer.get("type", "")).encode()).hexdigest()[:6]
+        lhash = hashlib.md5(str(layer_types).encode()).hexdigest()[:6]
         out_path = os.path.join(out_dir, f"{output_prefix}{lhash}.{output_format}")
         tmp_video = out_path + ".tmp.mp4" if audio_wav else out_path
 
@@ -587,13 +710,7 @@ class SF_PipelineRender:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         try:
             for fi in range(total):
-                frame = render_layer_frame(layer, fi, canvas)
-                if frame.shape[0] != h or frame.shape[1] != w:
-                    try:
-                        import cv2
-                        frame = cv2.resize(frame, (w, h))
-                    except ImportError:
-                        frame = np.zeros((h, w, 3), dtype=np.uint8)
+                frame = _composite_all_layers(all_layers, fi, canvas, w, h)
                 proc.stdin.write(frame.tobytes())
                 if collected is not None:
                     collected.append(frame)
@@ -608,7 +725,8 @@ class SF_PipelineRender:
         if pbar:
             pbar.update_absolute(90)
         if proc.returncode != 0:
-            _cleanup_layer(layer)
+            for layer in all_layers:
+                _cleanup_layer(layer)
             raise RuntimeError(f"ffmpeg failed (exit {proc.returncode})")
 
         # Mux audio
@@ -628,7 +746,8 @@ class SF_PipelineRender:
 
         if pbar:
             pbar.update_absolute(100)
-        _cleanup_layer(layer)
+        for layer in all_layers:
+            _cleanup_layer(layer)
 
         sz = os.path.getsize(out_path) / (1024 * 1024)
         logger.info(f"[SF Pipeline] ═══ Done: {out_path} ({sz:.1f}MB) ═══")
