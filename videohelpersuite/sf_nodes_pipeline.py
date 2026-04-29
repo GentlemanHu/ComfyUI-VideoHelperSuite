@@ -117,6 +117,14 @@ def _composite_all_layers(layers, frame_idx, canvas, w, h):
                 layer["background_frame"] = None
                 rendered = render_layer_frame(layer, frame_idx, canvas)
                 layer["background_frame"] = saved_bg
+                # Strip the dark bg_color (10,10,25) so only bright elements remain
+                # This prevents the dark bg from tinting the base layer
+                bg_c = layer.get("params", {}).get("bg_color", (10, 10, 25))
+                mask = np.zeros_like(rendered)
+                mask[:] = bg_c
+                # Subtract bg, anything brighter than bg is the actual visualizer
+                diff = rendered.astype(np.int16) - mask.astype(np.int16)
+                rendered = np.clip(diff, 0, 255).astype(np.uint8)
             else:
                 rendered = render_layer_frame(layer, frame_idx, canvas)
 
@@ -133,7 +141,8 @@ def _composite_all_layers(layers, frame_idx, canvas, w, h):
                 # Additive blend: bright visualizer pixels glow on top of base
                 base_f = base_frame.astype(np.float32)
                 over_f = rendered.astype(np.float32)
-                base_frame = np.clip(base_f + over_f * 0.7, 0, 255).astype(np.uint8)
+                # Full additive strength — visualizer elements are already isolated
+                base_frame = np.clip(base_f + over_f, 0, 255).astype(np.uint8)
         else:
             rendered = render_layer_frame(layer, frame_idx, canvas)
             if rendered.shape[0] != h or rendered.shape[1] != w:

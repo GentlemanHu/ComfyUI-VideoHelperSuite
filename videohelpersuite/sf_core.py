@@ -462,7 +462,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
         renderer = None
         cuda_mod = None
         
-        # 1. Try Native ShaderFlow OpenGL
+        # 1. Try Native ShaderFlow OpenGL (with full lifecycle)
         try:
             _setup_env_paths()
             import depthflow
@@ -470,22 +470,23 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             from shaderflow.scene import WindowBackend
             
             scene = DepthScene(backend=WindowBackend.Headless)
+            # Set raw data before initialize so _load_inputs works
             scene._raw_image = src_img
             scene._raw_depth = depth_np
-            scene.build()
-            scene.setup()
+            # Full lifecycle: initialize() → build() → setup() → compile shader
+            scene.initialize()
             renderer = ("opengl", scene)
             logger.info("[SF] DepthFlow: Native OpenGL initialized successfully")
         except Exception as e:
             logger.info(f"[SF] DepthFlow: Native OpenGL unavailable ({e}), trying CUDA...")
         
-        # 2. Try CUDA Fallback
+        # 2. Try CUDA — DepthFlow's official non-GUI renderer (same quality as OpenGL)
         if renderer is None:
             from .df_nodes_pipeline import _find_cuda_renderer
             cuda_mod = _find_cuda_renderer()
             if cuda_mod is not None and cuda_mod.is_available():
                 renderer = ("cuda", cuda_mod.CudaDepthFlowRenderer(img_f, dep_f))
-                logger.info("[SF] DepthFlow: CUDA renderer initialized")
+                logger.info("[SF] DepthFlow: CUDA renderer initialized (official quality)")
             else:
                 logger.warning("[SF] DepthFlow: CUDA unavailable, using CPU fallback")
                 renderer = ("cpu", None)
@@ -619,10 +620,11 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
     eff_aa = True if ssaa <= 1.0 else False
     frame_tensor = renderer.render_frame(
         ssaa_w, ssaa_h, state, quality_pct=90,
-        enable_inpaint=False, enable_aa=eff_aa
+        enable_inpaint=True, enable_aa=eff_aa
     )
     
-    frame_np = (frame_tensor.numpy() * 255).astype(np.uint8)
+    # render_frame() returns (H,W,3) uint8 tensor — DO NOT multiply by 255!
+    frame_np = frame_tensor.numpy()
     if ssaa != 1.0:
         try:
             import cv2
