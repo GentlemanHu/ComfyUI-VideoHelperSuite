@@ -404,6 +404,32 @@ def _setup_env_paths():
                 sys.path.insert(0, str(proj_dir))
 
 
+def _estimate_depth_simple(img_np, estimator: str = "da2"):
+    """Estimate depth map. Tries HF pipeline, falls back to luminance."""
+    import numpy as np
+    import logging
+    logger = logging.getLogger("ShaderFlow.Modular")
+    try:
+        from transformers import pipeline as hf_pipeline
+        model_ids = {
+            "da2": "depth-anything/Depth-Anything-V2-Small-hf",
+            "da1": "LiheYoung/depth-anything-small-hf",
+        }
+        model_id = model_ids.get(estimator, model_ids["da2"])
+        logger.info(f"[SF] Estimating depth with {model_id}...")
+        pipe = hf_pipeline("depth-estimation", model=model_id, device=0)
+        from PIL import Image as _PIL
+        result = pipe(_PIL.fromarray(img_np))
+        depth = np.array(result["depth"], dtype=np.float32)
+        if depth.max() > 0:
+            depth = depth / depth.max()
+        return depth
+    except Exception as e:
+        logger.warning(f"[SF] HF depth failed ({e}), using luminance fallback")
+        gray = np.mean(img_np.astype(np.float32), axis=2)
+        return 1.0 - (gray / max(gray.max(), 1.0))
+
+
 def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
                             w: int, h: int, fps: float,
                             canvas: dict):
