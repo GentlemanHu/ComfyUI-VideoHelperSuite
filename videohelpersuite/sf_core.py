@@ -371,14 +371,58 @@ def _apply_motion_blur_frame(layer: Dict, frame_idx: int) -> np.ndarray:
 
 
 def _setup_env_paths():
-    """Inject DepthFlow and ShaderFlow virtual environments into sys.path."""
+    """Inject DepthFlow and ShaderFlow virtual environments into sys.path and setup OpenGL env."""
     import sys
+    import os
+    import platform
+    import importlib
     from pathlib import Path
     
+    # --- 1. Linux EGL Environment Setup ---
+    if platform.system() != "Windows":
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
+        
+        # Check NVIDIA GPU
+        has_nvidia = False
+        import subprocess
+        try:
+            r = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and "NVIDIA" in r.stdout:
+                has_nvidia = True
+        except Exception:
+            pass
+            
+        if has_nvidia:
+            # Find ICD
+            egl_icd = None
+            candidates = [
+                "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+                "/usr/share/egl/egl_external_platform.d/10_nvidia.json",
+                "/etc/glvnd/egl_vendor.d/10_nvidia.json",
+                "/usr/lib/x86_64-linux-gnu/egl_vendor.d/10_nvidia.json",
+            ]
+            for c in candidates:
+                if os.path.isfile(c):
+                    egl_icd = c
+                    break
+            
+            if egl_icd:
+                os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = egl_icd
+            os.environ["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+            os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+            os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
+            os.environ.pop("MESA_GL_VERSION_OVERRIDE", None)
+        else:
+            os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "0")
+            os.environ.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
+
+    # --- 2. Virtual Environment Paths ---
     node_dir = Path(__file__).resolve().parent.parent # ComfyUI-VideoHelperSuite
     base_dir = node_dir.parent.parent                 # ComfyUI (or ComfyUI/own)
     
-    # 1. Check node-specific isolated venvs first (e.g., Paperspace deployments)
+    path_modified = False
+    
+    # Check node-specific isolated venvs first
     isolated_venvs = [
         node_dir / ".venv_depthflow",
         node_dir / ".venv_shaderflow"
@@ -388,20 +432,31 @@ def _setup_env_paths():
             venv_libs = list(venv_path.glob("lib/python*/site-packages"))
             if venv_libs and str(venv_libs[0]) not in sys.path:
                 sys.path.insert(0, str(venv_libs[0]))
+                path_modified = True
 
-    # 2. Check global parallel directories as fallbacks
+    # Check global parallel directories as fallbacks
     projects = ["DepthFlow", "ShaderFlow"]
     for proj in projects:
         proj_dir = base_dir / proj
         if proj_dir.is_dir():
-            # Check parallel venv
             venv_lib = list(proj_dir.glob('.venv*/lib/python*/site-packages'))
             if venv_lib and str(venv_lib[0]) not in sys.path:
                 sys.path.insert(0, str(venv_lib[0]))
+                path_modified = True
             
-            # Add project root itself
             if str(proj_dir) not in sys.path:
                 sys.path.insert(0, str(proj_dir))
+                path_modified = True
+
+    # --- 3. Force Reload Outdated Modules ---
+    if path_modified:
+        # If ComfyUI loaded an old 'attr' from system Python, force reload it from the new venv
+        for mod_name in ["attr", "attrs"]:
+            if mod_name in sys.modules:
+                try:
+                    importlib.reload(sys.modules[mod_name])
+                except Exception:
+                    pass
 
 
 def _estimate_depth_simple(img_np, estimator: str = "da2"):
