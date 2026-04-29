@@ -375,24 +375,33 @@ def _setup_env_paths():
     import sys
     from pathlib import Path
     
-    # Check ComfyUI/own/
-    base_dir = Path(__file__).resolve().parent.parent.parent.parent
+    node_dir = Path(__file__).resolve().parent.parent # ComfyUI-VideoHelperSuite
+    base_dir = node_dir.parent.parent                 # ComfyUI (or ComfyUI/own)
     
+    # 1. Check node-specific isolated venvs first (e.g., Paperspace deployments)
+    isolated_venvs = [
+        node_dir / ".venv_depthflow",
+        node_dir / ".venv_shaderflow"
+    ]
+    for venv_path in isolated_venvs:
+        if venv_path.is_dir():
+            venv_libs = list(venv_path.glob("lib/python*/site-packages"))
+            if venv_libs and str(venv_libs[0]) not in sys.path:
+                sys.path.insert(0, str(venv_libs[0]))
+
+    # 2. Check global parallel directories as fallbacks
     projects = ["DepthFlow", "ShaderFlow"]
     for proj in projects:
         proj_dir = base_dir / proj
-        if not proj_dir.is_dir():
-            continue
-            
-        # 1. Check local venv
-        venv_lib = list(proj_dir.glob('.venv*/lib/python*/site-packages'))
-        if venv_lib:
-            if str(venv_lib[0]) not in sys.path:
+        if proj_dir.is_dir():
+            # Check parallel venv
+            venv_lib = list(proj_dir.glob('.venv*/lib/python*/site-packages'))
+            if venv_lib and str(venv_lib[0]) not in sys.path:
                 sys.path.insert(0, str(venv_lib[0]))
-                
-        # 2. Add project root itself
-        if str(proj_dir) not in sys.path:
-            sys.path.insert(0, str(proj_dir))
+            
+            # Add project root itself
+            if str(proj_dir) not in sys.path:
+                sys.path.insert(0, str(proj_dir))
 
 
 def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
