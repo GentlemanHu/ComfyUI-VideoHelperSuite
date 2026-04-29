@@ -73,59 +73,81 @@ def _clone_pipeline(pipe):
 
 
 def _composite_all_layers(layers, frame_idx, canvas, w, h):
-    """Render all layers and composite them together via additive blending.
+    """Render all layers and composite them together.
 
-    Rendering order: first layer = bottom, last layer = top.
-    DepthFlow layers are rendered as full backgrounds.
-    Visualizer layers (bars/radial/waveform) are additively blended on top.
-    Post-process layers (color_grade/motion_blur) wrap whatever came before.
+    Smart compositing rules:
+    - DepthFlow layers render the full parallax scene as the base.
+    - When DepthFlow exists, visualizer layers render on BLACK background
+      and are additively overlaid so only bright spectrum elements show.
+    - Post-process layers (color_grade/motion_blur) apply to the final result.
     """
     if not layers:
         return np.zeros((h, w, 3), dtype=np.uint8)
 
-    # Classify layers into base and overlay
+    visual_types = ("bars", "radial", "waveform", "piano_roll", "glsl")
+    base_types = ("depthflow",)
+    fx_types = ("color_grade", "motion_blur")
+
+    has_base = any(l.get("type") in base_types for l in layers)
     base_frame = None
     post_fx_layers = []
 
     for layer in layers:
         ltype = layer.get("type", "")
 
-        # Post-process layers need special handling — they wrap prior result
-        if ltype in ("color_grade", "motion_blur"):
+        if ltype in fx_types:
             post_fx_layers.append(layer)
             continue
 
-        # Render this layer
-        rendered = render_layer_frame(layer, frame_idx, canvas)
-
-        # Ensure correct size
-        if rendered.shape[0] != h or rendered.shape[1] != w:
-            try:
-                import cv2
-                rendered = cv2.resize(rendered, (w, h))
-            except ImportError:
-                padded = np.zeros((h, w, 3), dtype=np.uint8)
-                rh, rw = min(rendered.shape[0], h), min(rendered.shape[1], w)
-                padded[:rh, :rw] = rendered[:rh, :rw]
-                rendered = padded
-
-        if base_frame is None:
-            # First layer becomes the base
+        if ltype in base_types:
+            rendered = render_layer_frame(layer, frame_idx, canvas)
+            if rendered.shape[0] != h or rendered.shape[1] != w:
+                try:
+                    import cv2
+                    rendered = cv2.resize(rendered, (w, h))
+                except ImportError:
+                    pass
             base_frame = rendered
+
+        elif ltype in visual_types:
+            # When DepthFlow exists, force visualizer onto BLACK background
+            # so only the bright bars/spectrum overlay, not a second copy of the image
+            if has_base:
+                saved_bg = layer.get("background_frame")
+                layer["background_frame"] = None
+                rendered = render_layer_frame(layer, frame_idx, canvas)
+                layer["background_frame"] = saved_bg
+            else:
+                rendered = render_layer_frame(layer, frame_idx, canvas)
+
+            if rendered.shape[0] != h or rendered.shape[1] != w:
+                try:
+                    import cv2
+                    rendered = cv2.resize(rendered, (w, h))
+                except ImportError:
+                    pass
+
+            if base_frame is None:
+                base_frame = rendered
+            else:
+                # Additive blend: bright visualizer pixels glow on top of base
+                base_f = base_frame.astype(np.float32)
+                over_f = rendered.astype(np.float32)
+                base_frame = np.clip(base_f + over_f * 0.7, 0, 255).astype(np.uint8)
         else:
-            # Composite: additive blend (visualizer on top of depthflow)
-            # Use screen-like blend: max of each pixel, preserving brightness
-            base_f = base_frame.astype(np.float32)
-            over_f = rendered.astype(np.float32)
-            # Screen blend: 1 - (1-A)*(1-B)  preserves detail from both layers
-            blended = 255.0 - ((255.0 - base_f) * (255.0 - over_f) / 255.0)
-            base_frame = np.clip(blended, 0, 255).astype(np.uint8)
+            rendered = render_layer_frame(layer, frame_idx, canvas)
+            if rendered.shape[0] != h or rendered.shape[1] != w:
+                try:
+                    import cv2
+                    rendered = cv2.resize(rendered, (w, h))
+                except ImportError:
+                    pass
+            base_frame = rendered if base_frame is None else rendered
 
     if base_frame is None:
         base_frame = np.zeros((h, w, 3), dtype=np.uint8)
 
     # Apply post-process FX on the composited result
-    # (color_grade and motion_blur act on the full composite)
     for fx_layer in post_fx_layers:
         params = fx_layer.get("params", {})
         if fx_layer["type"] == "color_grade":

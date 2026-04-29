@@ -634,8 +634,9 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
 
 
 def _render_df_frame_fallback(src_img, depth_np, w, h, total, frame_idx, params, audio_val: float, preset: str):
-    """CPU-only parallax simulation without CUDA. Real-time per frame."""
+    """CPU-only parallax simulation using vectorized cv2.remap. O(1) per frame."""
     import numpy as np
+    import math
     try:
         import cv2
         has_cv2 = True
@@ -646,57 +647,103 @@ def _render_df_frame_fallback(src_img, depth_np, w, h, total, frame_idx, params,
     movement = params.get("camera_movement", "vertical")
     loop = params.get("movement_loop", True)
 
+    # Resize source and depth to output size
     if has_cv2:
         src = cv2.resize(src_img, (w, h))
-        depth = cv2.resize(depth_np, (w, h))
+        depth = cv2.resize(depth_np, (w, h)).astype(np.float32)
     else:
-        src = np.zeros((h, w, 3), dtype=np.uint8)
-        src[:min(src_img.shape[0], h), :min(src_img.shape[1], w)] = src_img[:h, :w]
-        depth = np.zeros((h, w), dtype=np.float32)
+        # No cv2 = can't do remap, return scaled source
+        out = np.zeros((h, w, 3), dtype=np.uint8)
+        rh, rw = min(src_img.shape[0], h), min(src_img.shape[1], w)
+        out[:rh, :rw] = src_img[:rh, :rw]
+        return out
 
+    # Normalize depth to 0..1
+    dmin, dmax = depth.min(), depth.max()
+    if dmax > dmin:
+        depth = (depth - dmin) / (dmax - dmin)
+    else:
+        depth = np.zeros_like(depth)
+
+    # Compute phase animation
     phase = frame_idx / max(total - 1, 1)
     if loop:
-        import math
-        t_val = math.sin(phase * math.pi * 2) * intensity * 20
+        t_val = math.sin(phase * math.pi * 2) * intensity
     else:
-        t_val = (phase * 2 - 1) * intensity * 20
+        t_val = (phase * 2 - 1) * intensity
 
-    # Quick simulate audio reactivity
+    # Audio reactivity
     if preset != "none" and audio_val > 0.01:
-        scale_sim = 1.0
-        if preset == "subtle_pulse": scale_sim = 0.5
-        elif preset == "aggressive_bounce": scale_sim = 2.0
-        t_val += audio_val * 20.0 * scale_sim
+        scale_map = {
+            "subtle_pulse": 0.3, "heartbeat_zoom": 0.8,
+            "aggressive_bounce": 1.5, "chaotic_shake": 2.0, "custom": 1.0,
+        }
+        t_val += audio_val * scale_map.get(preset, 1.0)
 
-    if movement in ("vertical",):
-        shift_y = (depth * t_val).astype(np.int32)
-        frame = np.zeros_like(src)
-        for y in range(h):
-            for x in range(w):
-                sy = min(max(y + shift_y[y, x], 0), h - 1)
-                frame[y, x] = src[sy, x]
-    elif movement in ("horizontal",):
-        shift_x = (depth * t_val).astype(np.int32)
-        frame = np.zeros_like(src)
-        for y in range(h):
-            for x in range(w):
-                sx = min(max(x + shift_x[y, x], 0), w - 1)
-                frame[y, x] = src[y, sx]
+    # Build displacement maps using vectorized operations
+    # Base coordinate grids
+    grid_x, grid_y = np.meshgrid(
+        np.arange(w, dtype=np.float32),
+        np.arange(h, dtype=np.float32)
+    )
+    cx, cy = w / 2.0, h / 2.0
+    max_shift = min(w, h) * 0.05  # max pixel displacement as fraction of size
+
+    if movement == "vertical":
+        # Shift Y based on depth: deeper pixels shift more
+        shift = depth * t_val * max_shift
+        map_x = grid_x
+        map_y = grid_y - shift
+
+    elif movement == "horizontal":
+        shift = depth * t_val * max_shift
+        map_x = grid_x - shift
+        map_y = grid_y
+
+    elif movement == "circle":
+        angle = phase * math.pi * 2
+        dx = math.cos(angle) * intensity * max_shift
+        dy = math.sin(angle) * intensity * max_shift
+        shift_x = depth * dx
+        shift_y = depth * dy
+        if preset != "none" and audio_val > 0.01:
+            shift_x *= (1.0 + audio_val * 0.5)
+            shift_y *= (1.0 + audio_val * 0.5)
+        map_x = grid_x - shift_x
+        map_y = grid_y - shift_y
+
+    elif movement == "zoom":
+        # Zoom: scale from center based on depth
+        scale = 1.0 + depth * t_val * 0.1
+        map_x = cx + (grid_x - cx) / scale
+        map_y = cy + (grid_y - cy) / scale
+
+    elif movement == "dolly":
+        # Dolly: forward/backward motion based on depth
+        scale = 1.0 + depth * t_val * 0.08
+        map_x = cx + (grid_x - cx) / scale
+        map_y = cy + (grid_y - cy) / scale
+
+    elif movement == "orbital":
+        angle = phase * math.pi * 2
+        dx = math.cos(angle) * intensity * max_shift * 0.7
+        dy = math.sin(angle) * intensity * max_shift * 0.3
+        shift_x = depth * dx
+        shift_y = depth * dy
+        map_x = grid_x - shift_x
+        map_y = grid_y - shift_y
+
     else:
-        scale = 1.0 + depth * t_val * 0.01
-        if has_cv2:
-            map_x = np.zeros((h, w), dtype=np.float32)
-            map_y = np.zeros((h, w), dtype=np.float32)
-            cy, cx = h / 2, w / 2
-            for y in range(h):
-                for x in range(w):
-                    s = scale[y, x]
-                    map_x[y, x] = cx + (x - cx) / s
-                    map_y[y, x] = cy + (y - cy) / s
-            frame = cv2.remap(src, map_x, map_y, cv2.INTER_LINEAR,
-                              borderMode=cv2.BORDER_REPLICATE)
-        else:
-            frame = src.copy()
+        # Default: vertical
+        shift = depth * t_val * max_shift
+        map_x = grid_x
+        map_y = grid_y - shift
+
+    # Apply remap with border replication (prevents black edges)
+    frame = cv2.remap(
+        src, map_x, map_y, cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE
+    )
 
     return frame
 
