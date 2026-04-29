@@ -525,10 +525,10 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     # Native ShaderFlow updating requires setting scene.tau or using step
     # We will manually construct state
     try:
+        _setup_env_paths()
         from depthflow.state import DepthState
         from depthflow.animation import DepthAnimation
-        _setup_env_paths()
-            import depthflow.animation as dfa
+        import depthflow.animation as dfa
     except ImportError:
         return np.zeros((h, w, 3), dtype=np.uint8)
 
