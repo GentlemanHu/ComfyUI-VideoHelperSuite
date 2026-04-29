@@ -370,6 +370,7 @@ class SF_AddVisualizer:
                 "type": "radial",
                 "spectrum": pipe["spectrum"],
                 "params": {"colors": colors, "bg_color": (10, 10, 25)},
+                "background_frame": bg_getter,
             }
 
         elif vis_type == "waveform":
@@ -381,6 +382,7 @@ class SF_AddVisualizer:
                 "fps": pipe["canvas"]["fps"],
                 "params": {"line_color": colors[0] if colors else (0, 255, 180),
                            "bg_color": (10, 10, 25)},
+                "background_frame": bg_getter,
             }
 
         elif vis_type == "piano_roll":
@@ -691,6 +693,130 @@ class SF_AddGLSL:
 
 
 # ---------------------------------------------------------------------------
+# SF_AddDepthFlow — add DepthFlow parallax layer to pipeline
+# ---------------------------------------------------------------------------
+
+class SF_AddDepthFlow:
+    """Add a DepthFlow 2.5D parallax effect layer to the pipeline.
+    Uses pipeline background image as the source.
+    Supports audio-reactive parallax when spectrum is available.
+
+    CUDA renderer is preferred; falls back to subprocess if unavailable.
+    Existing DepthFlowGenerator node is NOT modified.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipeline": (T_SF_PIPELINE,),
+                "camera_movement": (["vertical", "horizontal", "zoom",
+                                     "circle", "dolly", "orbital", "static"], {
+                    "default": "vertical",
+                }),
+                "movement_intensity": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05,
+                }),
+                "steady_depth": ("FLOAT", {
+                    "default": 0.3, "min": -1.0, "max": 2.0, "step": 0.05,
+                }),
+                "isometric": ("FLOAT", {
+                    "default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05,
+                }),
+            },
+            "optional": {
+                "depth_map": ("IMAGE", {
+                    "tooltip": "外部深度图（不提供则自动估算）",
+                }),
+                "depth_estimator": (["da2", "da1", "depthpro", "zoedepth"], {
+                    "default": "da2",
+                }),
+                "movement_smooth": ("BOOLEAN", {"default": True}),
+                "movement_loop": ("BOOLEAN", {"default": True}),
+                "movement_reverse": ("BOOLEAN", {"default": False}),
+                "movement_phase": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                }),
+                "ssaa": ("FLOAT", {
+                    "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.25,
+                }),
+                "audio_reactive": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "用频谱低频驱动 parallax 强度",
+                }),
+                "audio_reactive_scale": ("FLOAT", {
+                    "default": 1.5, "min": 0.1, "max": 5.0, "step": 0.1,
+                    "tooltip": "音频驱动 parallax 的缩放系数",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (T_SF_PIPELINE,)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "add"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow Pipeline"
+
+    def add(self, pipeline, camera_movement, movement_intensity,
+            steady_depth, isometric,
+            depth_map=None, depth_estimator="da2",
+            movement_smooth=True, movement_loop=True,
+            movement_reverse=False, movement_phase=0.0,
+            ssaa=1.0, audio_reactive=False, audio_reactive_scale=1.5):
+        pipe = _clone_pipeline(pipeline)
+
+        if pipe["background"] is None:
+            raise ValueError("SF_AddDepthFlow requires a background image in the pipeline. "
+                             "Connect an IMAGE to SF_Pipeline.")
+
+        # Extract source image (first frame of background)
+        bg = pipe["background"]  # (N, H, W, 3) uint8
+        src_img = bg[0]  # (H, W, 3) uint8
+
+        # Process depth map
+        depth_np = None
+        if depth_map is not None:
+            if HAS_TORCH and isinstance(depth_map, torch.Tensor):
+                d = depth_map.cpu().numpy()
+            else:
+                d = np.asarray(depth_map)
+            if d.ndim == 4:
+                d = d[0]
+            if d.ndim == 3:
+                d = np.mean(d, axis=-1) if d.shape[-1] in (3, 4) else d[:, :, 0]
+            depth_np = d.astype(np.float32)
+            if depth_np.max() > 1.5:
+                depth_np = depth_np / 255.0
+            logger.info(f"[SF Pipeline] DepthFlow: using provided depth map {depth_np.shape}")
+
+        layer = {
+            "type": "depthflow",
+            "params": {
+                "camera_movement": camera_movement,
+                "movement_intensity": movement_intensity,
+                "steady_depth": steady_depth,
+                "isometric": isometric,
+                "movement_smooth": movement_smooth,
+                "movement_loop": movement_loop,
+                "movement_reverse": movement_reverse,
+                "movement_phase": movement_phase,
+                "ssaa": ssaa,
+                "depth_estimator": depth_estimator,
+                "audio_reactive": audio_reactive,
+                "audio_reactive_scale": audio_reactive_scale,
+            },
+            "_src_img": src_img,
+            "_depth_np": depth_np,
+            "_renderer": None,  # initialized at render time
+            "spectrum": pipe.get("spectrum"),  # for audio-reactive
+        }
+
+        pipe["layers"].append(layer)
+        logger.info(f"[SF Pipeline] Added DepthFlow layer: {camera_movement}, "
+                    f"intensity={movement_intensity}")
+        return (pipe,)
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -700,6 +826,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_SF_AddVisualizer": SF_AddVisualizer,
     "VHS_SF_AddEffect": SF_AddEffect,
     "VHS_SF_AddGLSL": SF_AddGLSL,
+    "VHS_SF_AddDepthFlow": SF_AddDepthFlow,
     "VHS_SF_PipelineRender": SF_PipelineRender,
 }
 
@@ -709,5 +836,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_SF_AddVisualizer": "SF Add Visualizer 🎨🅥🅗🅢",
     "VHS_SF_AddEffect": "SF Add Effect ✨🅥🅗🅢",
     "VHS_SF_AddGLSL": "SF Add GLSL 🔧🅥🅗🅢",
+    "VHS_SF_AddDepthFlow": "SF Add DepthFlow 🌊🅥🅗🅢",
     "VHS_SF_PipelineRender": "SF Pipeline Render 🎬🅥🅗🅢",
 }
+

@@ -64,6 +64,8 @@ def render_layer_frame(
         return _apply_color_grade_frame(layer, frame_idx)
     elif layer_type == "motion_blur":
         return _apply_motion_blur_frame(layer, frame_idx)
+    elif layer_type == "depthflow":
+        return _render_depthflow_frame(layer, frame_idx, t, w, h, fps, canvas)
     else:
         return np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -152,7 +154,11 @@ def _render_radial_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int) 
         (0, 255, 220), (120, 80, 255), (255, 50, 180), (255, 160, 40),
     ])
 
-    frame = np.full((h, w, 3), bg_color, dtype=np.uint8)
+    bg_img = layer.get("background_frame")
+    if bg_img is not None and callable(bg_img):
+        frame = bg_img(frame_idx, w, h).copy()
+    else:
+        frame = np.full((h, w, 3), bg_color, dtype=np.uint8)
     bins = len(spec)
     if bins == 0:
         return frame
@@ -195,7 +201,11 @@ def _render_waveform_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int
     line_color = tuple(params.get("line_color", (0, 255, 180)))
     audio = layer.get("audio")
 
-    frame = np.full((h, w, 3), bg_color, dtype=np.uint8)
+    bg_img = layer.get("background_frame")
+    if bg_img is not None and callable(bg_img):
+        frame = bg_img(frame_idx, w, h).copy()
+    else:
+        frame = np.full((h, w, 3), bg_color, dtype=np.uint8)
     if audio is None:
         return frame
 
@@ -356,6 +366,246 @@ def _apply_motion_blur_frame(layer: Dict, frame_idx: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# DepthFlow layer renderer
+# ---------------------------------------------------------------------------
+
+def _render_depthflow_frame(layer: Dict, frame_idx: int, t: float,
+                            w: int, h: int, fps: float,
+                            canvas: Dict) -> np.ndarray:
+    """DepthFlow renders a whole video, not per-frame.
+    Strategy: on first call, render entire video to temp file and extract all
+    frames into cache. Subsequent calls just return cached frames.
+    """
+    cache = layer.get("_frame_cache")
+    if cache is not None:
+        idx = min(frame_idx, len(cache) - 1)
+        frame = cache[idx]
+        if frame.shape[0] != h or frame.shape[1] != w:
+            try:
+                import cv2
+                frame = cv2.resize(frame, (w, h))
+            except ImportError:
+                pass
+        return frame
+
+    # First call — pre-render all frames
+    logger.info("[SF] DepthFlow: pre-rendering entire video...")
+    params = layer.get("params", {})
+    src_img = layer["_src_img"]  # (H, W, 3) uint8
+    depth_np = layer.get("_depth_np")
+    total = get_total_frames(canvas)
+    duration = canvas["duration"]
+
+    # Estimate depth if not provided
+    if depth_np is None:
+        depth_np = _estimate_depth_simple(src_img, params.get("depth_estimator", "da2"))
+
+    # Try CUDA renderer
+    frames = _depthflow_cuda_render(
+        src_img, depth_np, w, h, fps, duration, total, params
+    )
+
+    if frames is None:
+        # Fallback: simple parallax shift simulation
+        logger.info("[SF] DepthFlow: CUDA unavailable, using parallax fallback")
+        frames = _depthflow_fallback_render(src_img, depth_np, w, h, total, params)
+
+    layer["_frame_cache"] = frames
+    logger.info(f"[SF] DepthFlow: cached {len(frames)} frames")
+
+    idx = min(frame_idx, len(frames) - 1)
+    return frames[idx]
+
+
+def _estimate_depth_simple(img_np: np.ndarray, estimator: str = "da2") -> np.ndarray:
+    """Estimate depth map. Tries HF pipeline, falls back to luminance."""
+    try:
+        from transformers import pipeline as hf_pipeline
+        model_ids = {
+            "da2": "depth-anything/Depth-Anything-V2-Small-hf",
+            "da1": "LiheYoung/depth-anything-small-hf",
+        }
+        model_id = model_ids.get(estimator, model_ids["da2"])
+        logger.info(f"[SF] Estimating depth with {model_id}...")
+        pipe = hf_pipeline("depth-estimation", model=model_id, device=0)
+        from PIL import Image as _PIL
+        result = pipe(_PIL.fromarray(img_np))
+        depth = np.array(result["depth"], dtype=np.float32)
+        if depth.max() > 0:
+            depth = depth / depth.max()
+        return depth
+    except Exception as e:
+        logger.warning(f"[SF] HF depth failed ({e}), using luminance fallback")
+        gray = np.mean(img_np.astype(np.float32), axis=2)
+        return 1.0 - (gray / max(gray.max(), 1.0))
+
+
+def _depthflow_cuda_render(src_img, depth_np, w, h, fps, duration,
+                           total, params) -> Optional[List[np.ndarray]]:
+    """Try to render via CudaDepthFlowRenderer."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+    except ImportError:
+        return None
+
+    # Find cuda_renderer
+    from pathlib import Path
+    import importlib.util
+
+    search = [
+        Path(__file__).resolve().parent.parent / ".venv_depthflow",
+        Path(__file__).resolve().parent.parent.parent.parent / "DepthFlow",
+    ]
+
+    cuda_renderer = None
+    for base in search:
+        if base is None:
+            continue
+        # Build candidate paths
+        candidates = [base / "depthflow" / "cuda_renderer.py"]
+        lib_dir = base / "lib"
+        if lib_dir.is_dir():
+            candidates.extend(lib_dir.glob("python*/site-packages/depthflow/cuda_renderer.py"))
+
+        for candidate in candidates:
+            if candidate.is_file():
+                spec = importlib.util.spec_from_file_location(
+                    "depthflow.cuda_renderer", str(candidate))
+                cuda_renderer = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(cuda_renderer)
+                break
+        if cuda_renderer:
+            break
+
+    # Try import directly
+    if cuda_renderer is None:
+        try:
+            from depthflow import cuda_renderer
+        except ImportError:
+            return None
+
+    if not cuda_renderer.is_available():
+        return None
+
+    logger.info("[SF] DepthFlow: using CUDA renderer")
+    img_f = src_img.astype(np.float32) / 255.0
+    dep_f = depth_np.astype(np.float32)
+
+    renderer = cuda_renderer.CudaDepthFlowRenderer(img_f, dep_f)
+
+    # Render to temp video then extract frames
+    import tempfile, subprocess, os
+    tmp_path = os.path.join(tempfile.gettempdir(), f"sf_df_{id(renderer) % 99999}.mp4")
+
+    renderer.render_video(
+        output_path=tmp_path,
+        render_w=w, render_h=h,
+        fps=fps, duration=duration,
+        ssaa=params.get("ssaa", 1.0),
+        quality_pct=90,
+        camera_movement=params.get("camera_movement", "vertical"),
+        intensity=params.get("movement_intensity", 1.0),
+        smooth=params.get("movement_smooth", True),
+        loop=params.get("movement_loop", True),
+        reverse=params.get("movement_reverse", False),
+        phase=params.get("movement_phase", 0.0),
+        steady_depth=params.get("steady_depth", 0.3),
+        isometric_val=params.get("isometric", 0.6),
+        codec="h264",
+        output_format="mp4",
+    )
+
+    # Extract frames from rendered video
+    frames = []
+    try:
+        import cv2
+        cap = cv2.VideoCapture(tmp_path)
+        while True:
+            ret, f = cap.read()
+            if not ret:
+                break
+            frames.append(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+        cap.release()
+    except Exception as e:
+        logger.warning(f"[SF] DepthFlow frame extraction failed: {e}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    return frames if frames else None
+
+
+def _depthflow_fallback_render(src_img, depth_np, w, h, total,
+                                params) -> List[np.ndarray]:
+    """CPU-only parallax simulation without CUDA."""
+    try:
+        import cv2
+        has_cv2 = True
+    except ImportError:
+        has_cv2 = False
+
+    intensity = params.get("movement_intensity", 1.0)
+    movement = params.get("camera_movement", "vertical")
+    loop = params.get("movement_loop", True)
+
+    # Resize source to target
+    if has_cv2:
+        src = cv2.resize(src_img, (w, h))
+        depth = cv2.resize(depth_np, (w, h))
+    else:
+        src = np.zeros((h, w, 3), dtype=np.uint8)
+        src[:src_img.shape[0], :src_img.shape[1]] = src_img[:h, :w]
+        depth = np.zeros((h, w), dtype=np.float32)
+
+    frames = []
+    for fi in range(total):
+        phase = fi / total
+        if loop:
+            t_val = math.sin(phase * math.pi * 2) * intensity * 20
+        else:
+            t_val = (phase * 2 - 1) * intensity * 20
+
+        # Simple depth-based shift
+        if movement in ("vertical",):
+            shift_y = (depth * t_val).astype(np.int32)
+            frame = np.zeros_like(src)
+            for y in range(h):
+                for x in range(w):
+                    sy = min(max(y + shift_y[y, x], 0), h - 1)
+                    frame[y, x] = src[sy, x]
+        elif movement in ("horizontal",):
+            shift_x = (depth * t_val).astype(np.int32)
+            frame = np.zeros_like(src)
+            for y in range(h):
+                for x in range(w):
+                    sx = min(max(x + shift_x[y, x], 0), w - 1)
+                    frame[y, x] = src[y, sx]
+        else:
+            # Zoom: scale around center based on depth
+            scale = 1.0 + depth * t_val * 0.01
+            if has_cv2:
+                map_x = np.zeros((h, w), dtype=np.float32)
+                map_y = np.zeros((h, w), dtype=np.float32)
+                cy, cx = h / 2, w / 2
+                for y in range(h):
+                    for x in range(w):
+                        s = scale[y, x]
+                        map_x[y, x] = cx + (x - cx) / s
+                        map_y[y, x] = cy + (y - cy) / s
+                frame = cv2.remap(src, map_x, map_y, cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_REPLICATE)
+            else:
+                frame = src.copy()
+
+        frames.append(frame)
+    return frames
+
+
+# ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
 
@@ -373,3 +623,4 @@ def _gradient_color(t: float, colors: list) -> Tuple[int, int, int]:
 
 def get_total_frames(canvas: Dict[str, Any]) -> int:
     return max(1, int(canvas["duration"] * canvas["fps"]))
+
