@@ -3030,3 +3030,33 @@ if HAS_CUSTOM_FEATURES:
         NODE_DISPLAY_NAME_MAPPINGS.update(SF_DISPLAY_MAPPINGS)
     except Exception as e:
         print(f"ShaderFlow nodes not available: {e}")
+
+    # Try to add ShaderFlow Modular nodes (SF_*)
+    try:
+        from .sf_nodes_input import (
+            NODE_CLASS_MAPPINGS as SFI_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SFI_DN,
+        )
+        from .sf_nodes_analysis import (
+            NODE_CLASS_MAPPINGS as SFA_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SFA_DN,
+        )
+        from .sf_nodes_layer import (
+            NODE_CLASS_MAPPINGS as SFL_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SFL_DN,
+        )
+        from .sf_nodes_output import (
+            NODE_CLASS_MAPPINGS as SFO_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SFO_DN,
+        )
+        NODE_CLASS_MAPPINGS.update(SFI_CM)
+        NODE_CLASS_MAPPINGS.update(SFA_CM)
+        NODE_CLASS_MAPPINGS.update(SFL_CM)
+        NODE_CLASS_MAPPINGS.update(SFO_CM)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SFI_DN)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SFA_DN)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SFL_DN)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SFO_DN)
+        print(f"ShaderFlow Modular: {len(SFI_CM)+len(SFA_CM)+len(SFL_CM)+len(SFO_CM)} nodes registered")
+    except Exception as e:
+        print(f"ShaderFlow Modular nodes not available: {e}")

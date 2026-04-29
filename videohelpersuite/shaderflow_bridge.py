@@ -885,3 +885,144 @@ class HeadlessGLSLRenderer:
         """Wrap ShaderToy mainImage code into a standalone fragment shader."""
         return cls.SHADERTOY_WRAPPER.replace("{SHADERTOY_CODE}", code)
 
+
+# ---------------------------------------------------------------------------
+# Modular Bridge Functions (for shaderflow_modular_nodes.py)
+# ---------------------------------------------------------------------------
+
+def load_audio_normalized(
+    path: str,
+    samplerate: int = 44100,
+    channels: int = 2,
+) -> Dict[str, Any]:
+    """Load audio and return standardized SF_AUDIO dict.
+    Returns: {"samples": ndarray(C,N), "sr": int, "duration": float, "channels": int}
+    """
+    samples, sr = read_audio_file(path, samplerate=samplerate, channels=channels)
+    duration = samples.shape[1] / sr if samples.shape[1] > 0 else 0.0
+    logger.info(f"[SF] Audio loaded: {sr}Hz, {channels}ch, {duration:.2f}s, {samples.shape[1]} samples")
+    return {
+        "samples": samples,
+        "sr": sr,
+        "duration": duration,
+        "channels": channels,
+        "path": str(path),
+    }
+
+
+def compute_spectrum_batch(
+    audio_data: Dict[str, Any],
+    fps: float = 30.0,
+    fft_n: int = 12,
+    bins: int = 128,
+    min_freq: float = 20.0,
+    max_freq: float = 16000.0,
+    progress_cb=None,
+) -> Dict[str, Any]:
+    """Compute per-frame spectrum from SF_AUDIO data.
+    Returns SF_SPECTRUM: {"bins": ndarray(F,B), "sr": int, "fps": float, "duration": float}
+    """
+    samples = audio_data["samples"]
+    sr = audio_data["sr"]
+    duration = audio_data["duration"]
+    total_frames = max(1, int(duration * fps))
+    fft_size = int(2 ** fft_n)
+
+    engine = SpectrogramEngine(
+        samplerate=sr, fft_n=fft_n, min_freq=min_freq,
+        max_freq=max_freq, bins=bins, channels=samples.shape[0],
+    )
+    logger.info(f"[SF] Computing spectrum: {total_frames} frames, {bins} bins, fft={fft_size}")
+
+    all_bins = np.zeros((total_frames, bins), dtype=np.float32)
+    for fi in range(total_frames):
+        t = fi / fps
+        center_sample = int(t * sr)
+        start_s = max(0, center_sample - fft_size // 2)
+        end_s = start_s + fft_size
+        if end_s > samples.shape[1]:
+            end_s = samples.shape[1]
+            start_s = max(0, end_s - fft_size)
+        chunk = samples[:, start_s:end_s]
+        spec = engine.compute(chunk)
+        if spec.ndim == 2:
+            spec = spec.mean(axis=0)
+        all_bins[fi] = spec
+        if progress_cb and fi % 100 == 0:
+            progress_cb(fi, total_frames)
+
+    # Normalize to 0-1
+    peak = all_bins.max()
+    if peak > 1e-8:
+        all_bins /= peak
+
+    logger.info(f"[SF] Spectrum computed: shape={all_bins.shape}, peak={peak:.4f}")
+    return {
+        "bins": all_bins,
+        "sr": sr,
+        "fps": fps,
+        "duration": duration,
+        "num_bins": bins,
+    }
+
+
+def write_frames_to_video_with_progress(
+    frames: List[np.ndarray],
+    output_path: str,
+    fps: float = 30.0,
+    audio_path: Optional[str] = None,
+    codec: str = "libx264",
+    quality: int = 23,
+    progress_cb=None,
+) -> str:
+    """Write frames to video with encoding progress callback.
+    progress_cb(current_frame, total_frames) called during encoding.
+    """
+    if not frames:
+        raise ValueError("No frames to encode")
+    h, w = frames[0].shape[:2]
+    total = len(frames)
+    tmp_video = output_path + ".tmp.mp4" if audio_path else output_path
+
+    logger.info(f"[SF] Encoding video: {w}x{h} @ {fps}fps, {total} frames, codec={codec}")
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}", "-pix_fmt", "rgb24",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", codec, "-crf", str(quality),
+        "-pix_fmt", "yuv420p",
+        tmp_video,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    for i, f in enumerate(frames):
+        proc.stdin.write(f.tobytes())
+        if progress_cb and i % 10 == 0:
+            progress_cb(i, total)
+    proc.stdin.close()
+    proc.wait()
+    if progress_cb:
+        progress_cb(total, total)
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg encoding failed (exit {proc.returncode})")
+
+    if audio_path and os.path.exists(audio_path):
+        logger.info(f"[SF] Muxing audio: {audio_path}")
+        mux_cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", tmp_video,
+            "-i", audio_path,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            output_path,
+        ]
+        subprocess.run(mux_cmd, check=True, timeout=120)
+        os.remove(tmp_video)
+
+    file_size = os.path.getsize(output_path) / (1024 * 1024)
+    logger.info(f"[SF] Video saved: {output_path} ({file_size:.1f} MB)")
+    return output_path
+
