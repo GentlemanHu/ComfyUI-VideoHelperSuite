@@ -800,6 +800,7 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
 
 def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, audio_val: float, preset: str):
     import numpy as np
+    import inspect
     tau = frame_idx / max(total - 1, 1)
     
     state = cuda_mod.compute_animation_state(
@@ -821,13 +822,18 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
     
     q = _depthflow_quality_settings(params)
     eff_aa = True if ssaa <= 1.0 else False
-    frame_tensor = renderer.render_frame(
-        ssaa_w, ssaa_h, state, quality_pct=q["quality_pct"],
-        enable_inpaint=q["enable_inpaint"],
-        inpaint_threshold=q["inpaint_threshold"],
-        inpaint_mode="soften" if q["enable_inpaint"] else "off",
-        enable_aa=eff_aa,
-    )
+    render_kwargs = {
+        "quality_pct": q["quality_pct"],
+        "enable_inpaint": q["enable_inpaint"],
+        "inpaint_threshold": q["inpaint_threshold"],
+        "enable_aa": eff_aa,
+    }
+    try:
+        if "inpaint_mode" in inspect.signature(renderer.render_frame).parameters:
+            render_kwargs["inpaint_mode"] = "soften" if q["enable_inpaint"] else "off"
+    except (TypeError, ValueError):
+        pass
+    frame_tensor = renderer.render_frame(ssaa_w, ssaa_h, state, **render_kwargs)
     
     # render_frame() returns (H,W,3) uint8 tensor — DO NOT multiply by 255!
     frame_np = frame_tensor.numpy()

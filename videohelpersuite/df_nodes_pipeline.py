@@ -422,6 +422,7 @@ class DF_Render:
         """O(1) memory: render_frame() per frame → ffmpeg pipe."""
         from comfy.utils import ProgressBar
         import subprocess, shutil, time
+        import inspect
 
         img_f = img_np.astype(np.float32) / 255.0
         dep_f = depth_np.astype(np.float32)
@@ -493,13 +494,17 @@ class DF_Render:
                 state.color_sepia = pfx.get("color_sepia", 0.0)
 
                 eff_aa = enable_aa and (ssaa <= 1.0)
-                frame = renderer.render_frame(
-                    ssaa_w, ssaa_h, state, quality,
-                    enable_inpaint=enable_inpaint,
-                    inpaint_threshold=inpaint_threshold,
-                    inpaint_mode="soften" if enable_inpaint else "off",
-                    enable_aa=eff_aa,
-                )
+                render_kwargs = {
+                    "enable_inpaint": enable_inpaint,
+                    "inpaint_threshold": inpaint_threshold,
+                    "enable_aa": eff_aa,
+                }
+                try:
+                    if "inpaint_mode" in inspect.signature(renderer.render_frame).parameters:
+                        render_kwargs["inpaint_mode"] = "soften" if enable_inpaint else "off"
+                except (TypeError, ValueError):
+                    pass
+                frame = renderer.render_frame(ssaa_w, ssaa_h, state, quality, **render_kwargs)
                 proc.stdin.write(frame.numpy().tobytes())
 
                 if output_frames:
