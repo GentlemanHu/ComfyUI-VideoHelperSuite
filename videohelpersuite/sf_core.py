@@ -552,38 +552,84 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     # Native ShaderFlow updating requires setting scene.tau or using step
     # We will manually construct state
     try:
-        _setup_env_paths()
         from depthflow.state import DepthState
-        from depthflow.animation import DepthAnimation
         import depthflow.animation as dfa
     except ImportError:
         return np.zeros((h, w, 3), dtype=np.uint8)
 
     state = DepthState()
     
-    try:
-        from depthflow.cuda_renderer import compute_animation_state
-        c_state = compute_animation_state(
-            params.get("camera_movement", "vertical"), tau,
-            intensity=params.get("movement_intensity", 1.0),
-            smooth=params.get("movement_smooth", True),
-            loop=params.get("movement_loop", True),
-            reverse=params.get("movement_reverse", False),
-            phase=params.get("movement_phase", 0.0),
-            steady_depth=params.get("steady_depth", 0.3),
-            isometric=params.get("isometric", 0.6)
-        )
-        state.height = c_state.height
-        state.steady = c_state.steady
-        state.focus = c_state.focus
-        state.zoom = c_state.zoom
-        state.isometric = c_state.isometric
-        state.dolly = c_state.dolly
-        state.offset = (c_state.offset_x, c_state.offset_y)
-    except ImportError:
-        # Fallback if depthflow.cuda_renderer is missing
+    # Map params to scene.state
+    move_map = {
+        "vertical": getattr(dfa, "Vertical", None),
+        "horizontal": getattr(dfa, "Horizontal", None),
+        "circle": getattr(dfa, "Circle", None),
+        "zoom": getattr(dfa, "Zoom", None),
+        "dolly": getattr(dfa, "Dolly", None),
+        "orbital": getattr(dfa, "Orbital", None),
+    }
+    move_cls = move_map.get(params.get("camera_movement", "vertical"))
+    
+    if move_cls:
+        # 1. Initialize native DepthFlow implementation
+        action = move_cls()
+        
+        # 2. Map properties safely to the new Pydantic schema (nested 'Sine' wave)
+        intensity = params.get("movement_intensity", 1.0)
+        phase = params.get("movement_phase", 0.0)
+        cycles = 1.0 if params.get("movement_loop", True) else 0.5
+        
+        if hasattr(action, 'wave'):
+            action.wave.amplitude = intensity
+            action.wave.phase = phase
+            action.wave.cycles = cycles
+        elif hasattr(action, 'x') and hasattr(action, 'y'):
+            action.x.amplitude = intensity
+            action.x.phase = phase
+            action.x.cycles = cycles
+            action.y.amplitude = intensity
+            action.y.phase = phase
+            action.y.cycles = cycles
+        else:
+            # Fallback for old/other native implementations
+            if hasattr(action, 'intensity'): action.intensity = intensity
+            if hasattr(action, 'phase'): action.phase = phase
+            if hasattr(action, 'loop'): action.loop = params.get("movement_loop", True)
+            if hasattr(action, 'reverse'): action.reverse = params.get("movement_reverse", False)
+            if hasattr(action, 'smooth'): action.smooth = params.get("movement_smooth", True)
+            if hasattr(action, 'steady'): action.steady = params.get("steady_depth", 0.3)
+            if hasattr(action, 'isometric'): action.isometric = params.get("isometric", 0.6)
+            
+        action.apply(state, tau)
+        
+        # 3. Global parameters not mutated by specific native offset Actions
         state.steady = params.get("steady_depth", 0.3)
         state.isometric = params.get("isometric", 0.6)
+        
+    else:
+        # Only fallback to CUDA math if the native implementation class is MISSING
+        try:
+            from depthflow.cuda_renderer import compute_animation_state
+            c_state = compute_animation_state(
+                params.get("camera_movement", "vertical"), tau,
+                intensity=params.get("movement_intensity", 1.0),
+                smooth=params.get("movement_smooth", True),
+                loop=params.get("movement_loop", True),
+                reverse=params.get("movement_reverse", False),
+                phase=params.get("movement_phase", 0.0),
+                steady_depth=params.get("steady_depth", 0.3),
+                isometric=params.get("isometric", 0.6)
+            )
+            state.height = c_state.height
+            state.steady = c_state.steady
+            state.focus = c_state.focus
+            state.zoom = c_state.zoom
+            state.isometric = c_state.isometric
+            state.dolly = c_state.dolly
+            state.offset = (c_state.offset_x, c_state.offset_y)
+        except ImportError:
+            state.steady = params.get("steady_depth", 0.3)
+            state.isometric = params.get("isometric", 0.6)
 
     # Apply Audio Presets
     _apply_audio_preset(state, audio_val, preset, params)
