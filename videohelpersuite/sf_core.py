@@ -561,52 +561,29 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
 
     state = DepthState()
     
-    # Safely get classes, as some (Zoom, Dolly, Orbital) might be missing in this depthflow version
-    move_map = {
-        "vertical": getattr(dfa, "Vertical", None),
-        "horizontal": getattr(dfa, "Horizontal", None),
-        "circle": getattr(dfa, "Circle", None),
-        "zoom": getattr(dfa, "Zoom", None),
-        "dolly": getattr(dfa, "Dolly", None),
-        "orbital": getattr(dfa, "Orbital", None),
-    }
-    move_cls = move_map.get(params.get("camera_movement", "vertical"))
-    
-    if move_cls:
-        action = move_cls()
-        action.intensity = params.get("movement_intensity", 1.0)
-        action.smooth = params.get("movement_smooth", True)
-        action.loop = params.get("movement_loop", True)
-        action.reverse = params.get("movement_reverse", False)
-        action.phase = params.get("movement_phase", 0.0)
-        action.steady = params.get("steady_depth", 0.3)
-        action.isometric = params.get("isometric", 0.6)
-        action.apply(state, tau)
-    else:
-        # If native class is missing, fallback to our robust compute_animation_state
-        from .df_nodes_pipeline import _find_cuda_renderer
-        cuda_mod = _find_cuda_renderer()
-        if cuda_mod is not None:
-            c_state = cuda_mod.compute_animation_state(
-                params.get("camera_movement", "vertical"), tau,
-                intensity=params.get("movement_intensity", 1.0),
-                smooth=params.get("movement_smooth", True),
-                loop=params.get("movement_loop", True),
-                reverse=params.get("movement_reverse", False),
-                phase=params.get("movement_phase", 0.0),
-                steady_depth=params.get("steady_depth", 0.3),
-                isometric=params.get("isometric", 0.6)
-            )
-            state.height = c_state.height
-            state.steady = c_state.steady
-            state.focus = c_state.focus
-            state.zoom = c_state.zoom
-            state.isometric = c_state.isometric
-            state.dolly = c_state.dolly
-            state.offset = (c_state.offset_x, c_state.offset_y)
-        else:
-            state.steady = params.get("steady_depth", 0.3)
-            state.isometric = params.get("isometric", 0.6)
+    try:
+        from depthflow.cuda_renderer import compute_animation_state
+        c_state = compute_animation_state(
+            params.get("camera_movement", "vertical"), tau,
+            intensity=params.get("movement_intensity", 1.0),
+            smooth=params.get("movement_smooth", True),
+            loop=params.get("movement_loop", True),
+            reverse=params.get("movement_reverse", False),
+            phase=params.get("movement_phase", 0.0),
+            steady_depth=params.get("steady_depth", 0.3),
+            isometric=params.get("isometric", 0.6)
+        )
+        state.height = c_state.height
+        state.steady = c_state.steady
+        state.focus = c_state.focus
+        state.zoom = c_state.zoom
+        state.isometric = c_state.isometric
+        state.dolly = c_state.dolly
+        state.offset = (c_state.offset_x, c_state.offset_y)
+    except ImportError:
+        # Fallback if depthflow.cuda_renderer is missing
+        state.steady = params.get("steady_depth", 0.3)
+        state.isometric = params.get("isometric", 0.6)
 
     # Apply Audio Presets
     _apply_audio_preset(state, audio_val, preset, params)
