@@ -143,18 +143,22 @@ class DF_Pipeline:
             # DepthState defaults
             "state": {
                 "height": 0.20, "steady": 0.15, "focus": 0.0,
+                "mirror": True,
                 "zoom": 1.0, "isometric": 0.0, "dolly": 0.0,
                 "offset_x": 0.0, "offset_y": 0.0,
                 "center_x": 0.0, "center_y": 0.0,
+                "origin_x": 0.0, "origin_y": 0.0,
             },
             # PostFX defaults (all off)
             "postfx": {
                 "vignette_enable": False, "vignette_intensity": 0.2, "vignette_decay": 20.0,
-                "lens_enable": False, "lens_intensity": 0.1, "lens_decay": 0.4,
+                "lens_enable": False, "lens_intensity": 0.1, "lens_decay": 0.4, "lens_quality": 30,
                 "blur_enable": False, "blur_intensity": 1.0,
                 "blur_start": 0.6, "blur_end": 1.0,
+                "blur_exponent": 2.0, "blur_quality": 4, "blur_directions": 16,
                 "color_saturation": 1.0, "color_contrast": 1.0,
                 "color_brightness": 1.0, "color_sepia": 0.0,
+                "color_gamma": 1.0, "color_grayscale": 0.0,
             },
         }
         logger.info(f"DF Pipeline created: {w}x{h}, depth={depth_np.shape}")
@@ -224,12 +228,17 @@ class DF_SetState:
                                      "tooltip": "焦点深度 (Focal depth for offsets)"}),
                 "focus": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 1.0, "step": 0.01,
                                     "tooltip": "聚焦深度 (Perspective-neutral depth)"}),
+                "mirror": ("BOOLEAN", {"default": True, "tooltip": "DepthFlow 原生边缘镜像采样"}),
                 "zoom": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "isometric": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
                                         "tooltip": "等距投影因子 (0=透视 1=正交)"}),
                 "dolly": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1}),
                 "offset_x": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
                 "offset_y": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "center_x": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "center_y": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "origin_x": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "origin_y": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
             },
         }
 
@@ -239,14 +248,17 @@ class DF_SetState:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/DepthFlow Pipeline"
 
     def set_state(self, pipeline, height=0.20, steady=0.15, focus=0.0,
-                  zoom=1.0, isometric=0.0, dolly=0.0,
-                  offset_x=0.0, offset_y=0.0):
+                  mirror=True, zoom=1.0, isometric=0.0, dolly=0.0,
+                  offset_x=0.0, offset_y=0.0, center_x=0.0, center_y=0.0,
+                  origin_x=0.0, origin_y=0.0):
         pipe = _clone_pipe(pipeline)
         pipe["state"] = {
             "height": height, "steady": steady, "focus": focus,
+            "mirror": mirror,
             "zoom": zoom, "isometric": isometric, "dolly": dolly,
             "offset_x": offset_x, "offset_y": offset_y,
-            "center_x": 0.0, "center_y": 0.0,
+            "center_x": center_x, "center_y": center_y,
+            "origin_x": origin_x, "origin_y": origin_y,
         }
         logger.info(f"DF State: height={height}, steady={steady}, iso={isometric}")
         return (pipe,)
@@ -271,14 +283,21 @@ class DF_SetPostFX:
                 "vignette_decay": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 100.0, "step": 1.0}),
                 "lens_enable": ("BOOLEAN", {"default": False}),
                 "lens_intensity": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "lens_decay": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "lens_quality": ("INT", {"default": 30, "min": 0, "max": 60}),
                 "blur_enable": ("BOOLEAN", {"default": False}),
                 "blur_intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "blur_start": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01,
                                          "tooltip": "景深模糊起始深度"}),
                 "blur_end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "blur_exponent": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 8.0, "step": 0.1}),
+                "blur_quality": ("INT", {"default": 4, "min": 1, "max": 16}),
+                "blur_directions": ("INT", {"default": 16, "min": 1, "max": 32}),
                 "color_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "color_contrast": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "color_brightness": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "color_gamma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 3.0, "step": 0.01}),
+                "color_grayscale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "color_sepia": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
@@ -290,10 +309,12 @@ class DF_SetPostFX:
 
     def set_postfx(self, pipeline,
                    vignette_enable=False, vignette_intensity=0.2, vignette_decay=20.0,
-                   lens_enable=False, lens_intensity=0.1,
+                   lens_enable=False, lens_intensity=0.1, lens_decay=0.4, lens_quality=30,
                    blur_enable=False, blur_intensity=1.0, blur_start=0.6, blur_end=1.0,
+                   blur_exponent=2.0, blur_quality=4, blur_directions=16,
                    color_saturation=1.0, color_contrast=1.0,
-                   color_brightness=1.0, color_sepia=0.0):
+                   color_brightness=1.0, color_gamma=1.0,
+                   color_grayscale=0.0, color_sepia=0.0):
         pipe = _clone_pipe(pipeline)
         pipe["postfx"] = {
             "vignette_enable": vignette_enable,
@@ -301,14 +322,20 @@ class DF_SetPostFX:
             "vignette_decay": vignette_decay,
             "lens_enable": lens_enable,
             "lens_intensity": lens_intensity,
-            "lens_decay": 0.4,
+            "lens_decay": lens_decay,
+            "lens_quality": lens_quality,
             "blur_enable": blur_enable,
             "blur_intensity": blur_intensity,
             "blur_start": blur_start,
             "blur_end": blur_end,
+            "blur_exponent": blur_exponent,
+            "blur_quality": blur_quality,
+            "blur_directions": blur_directions,
             "color_saturation": color_saturation,
             "color_contrast": color_contrast,
             "color_brightness": color_brightness,
+            "color_gamma": color_gamma,
+            "color_grayscale": color_grayscale,
             "color_sepia": color_sepia,
         }
         logger.info(f"DF PostFX: vig={vignette_enable}, lens={lens_enable}, blur={blur_enable}")
@@ -470,9 +497,18 @@ class DF_Render:
                 )
                 # Override with user state settings
                 state.height = state_cfg.get("height", state.height)
+                state.steady = state_cfg.get("steady", state.steady)
                 state.focus = state_cfg.get("focus", state.focus)
                 state.zoom = state_cfg.get("zoom", state.zoom)
+                state.isometric = state_cfg.get("isometric", state.isometric)
                 state.dolly = state_cfg.get("dolly", state.dolly)
+                state.mirror = state_cfg.get("mirror", state.mirror)
+                state.offset_x = state_cfg.get("offset_x", state.offset_x)
+                state.offset_y = state_cfg.get("offset_y", state.offset_y)
+                state.center_x = state_cfg.get("center_x", state.center_x)
+                state.center_y = state_cfg.get("center_y", state.center_y)
+                state.origin_x = state_cfg.get("origin_x", state.origin_x)
+                state.origin_y = state_cfg.get("origin_y", state.origin_y)
 
                 # Apply PostFX to state
                 pfx = postfx
@@ -483,14 +519,21 @@ class DF_Render:
                 if pfx.get("lens_enable"):
                     state.lens_enable = True
                     state.lens_intensity = pfx["lens_intensity"]
+                    state.lens_decay = pfx.get("lens_decay", state.lens_decay)
+                    state.lens_quality = pfx.get("lens_quality", state.lens_quality)
                 if pfx.get("blur_enable"):
                     state.blur_enable = True
                     state.blur_intensity = pfx["blur_intensity"]
                     state.blur_start = pfx["blur_start"]
                     state.blur_end = pfx["blur_end"]
+                    state.blur_exponent = pfx.get("blur_exponent", state.blur_exponent)
+                    state.blur_quality = pfx.get("blur_quality", state.blur_quality)
+                    state.blur_directions = pfx.get("blur_directions", state.blur_directions)
                 state.color_saturation = pfx.get("color_saturation", 1.0)
                 state.color_contrast = pfx.get("color_contrast", 1.0)
                 state.color_brightness = pfx.get("color_brightness", 1.0)
+                state.color_gamma = pfx.get("color_gamma", 1.0)
+                state.color_grayscale = pfx.get("color_grayscale", 0.0)
                 state.color_sepia = pfx.get("color_sepia", 0.0)
 
                 eff_aa = enable_aa and (ssaa <= 1.0)

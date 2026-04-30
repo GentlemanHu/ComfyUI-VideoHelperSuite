@@ -682,8 +682,109 @@ def _apply_audio_preset(state, audio_val: float, preset: str, params: dict):
             state.height += audio_val * 0.25
         if target == "isometric":
             state.isometric += audio_val * 0.3
-        if target == "phase":
+        if target == "phase" and hasattr(state, "phase"):
             state.phase += audio_val * 0.5
+
+
+def _set_depth_tuple(state, attr: str, x: float, y: float):
+    """Set DepthState tuple fields on native or CUDA state objects."""
+    if hasattr(state, attr):
+        try:
+            setattr(state, attr, (float(x), float(y)))
+            return
+        except Exception:
+            pass
+    setattr(state, f"{attr}_x", float(x))
+    setattr(state, f"{attr}_y", float(y))
+
+
+def _add_depth_tuple(state, attr: str, x: float, y: float):
+    """Add to tuple/vector state fields without erasing animation output."""
+    x = float(x)
+    y = float(y)
+    if hasattr(state, attr):
+        cur = getattr(state, attr)
+        try:
+            setattr(state, attr, (float(cur[0]) + x, float(cur[1]) + y))
+            return
+        except Exception:
+            pass
+    setattr(state, f"{attr}_x", float(getattr(state, f"{attr}_x", 0.0)) + x)
+    setattr(state, f"{attr}_y", float(getattr(state, f"{attr}_y", 0.0)) + y)
+
+
+def _apply_depthflow_state_overrides(state, params: dict):
+    """Apply explicit DepthFlow controls shared by CUDA and OpenGL paths."""
+    height_mode = params.get("height_mode", "motion_preset")
+    if height_mode == "override":
+        state.height = float(params.get("depth_height", state.height))
+    elif height_mode == "multiply":
+        state.height *= float(params.get("depth_height", 1.0))
+
+    state.steady = float(params.get("steady_depth", state.steady))
+    state.focus = float(params.get("focus_depth", getattr(state, "focus", 0.0)))
+    state.zoom = float(params.get("zoom", getattr(state, "zoom", 1.0)))
+    state.isometric = float(params.get("isometric", getattr(state, "isometric", 0.0)))
+    state.dolly = float(params.get("dolly", getattr(state, "dolly", 0.0)))
+
+    if hasattr(state, "mirror"):
+        state.mirror = bool(params.get("mirror", state.mirror))
+    _add_depth_tuple(state, "offset", params.get("offset_x", 0.0), params.get("offset_y", 0.0))
+    _set_depth_tuple(state, "center", params.get("center_x", 0.0), params.get("center_y", 0.0))
+    _set_depth_tuple(state, "origin", params.get("origin_x", 0.0), params.get("origin_y", 0.0))
+
+
+def _apply_depthflow_postfx(state, params: dict):
+    """Apply DepthFlow post-processing controls to native or CUDA states."""
+    vig = float(params.get("vignette_intensity", 0.0))
+    if hasattr(state, "vignette"):
+        state.vignette.intensity = vig
+        state.vignette.decay = float(params.get("vignette_decay", state.vignette.decay))
+    else:
+        state.vig_enable = vig > 0.0
+        state.vig_intensity = vig
+        state.vig_decay = float(params.get("vignette_decay", getattr(state, "vig_decay", 20.0)))
+
+    lens = float(params.get("lens_intensity", 0.0))
+    if hasattr(state, "lens"):
+        state.lens.intensity = lens
+        state.lens.decay = float(params.get("lens_decay", state.lens.decay))
+        state.lens.quality = int(params.get("lens_quality", state.lens.quality))
+    else:
+        state.lens_enable = lens > 0.0
+        state.lens_intensity = lens
+        state.lens_decay = float(params.get("lens_decay", getattr(state, "lens_decay", 0.4)))
+        state.lens_quality = int(params.get("lens_quality", getattr(state, "lens_quality", 30)))
+
+    blur = float(params.get("blur_intensity", 0.0))
+    if hasattr(state, "blur"):
+        state.blur.intensity = blur
+        state.blur.start = float(params.get("blur_start", state.blur.start))
+        state.blur.end = float(params.get("blur_end", state.blur.end))
+        state.blur.exponent = float(params.get("blur_exponent", state.blur.exponent))
+        state.blur.quality = int(params.get("blur_quality", state.blur.quality))
+        state.blur.directions = int(params.get("blur_directions", state.blur.directions))
+    else:
+        state.blur_enable = blur > 0.0
+        state.blur_intensity = blur
+        state.blur_start = float(params.get("blur_start", getattr(state, "blur_start", 0.6)))
+        state.blur_end = float(params.get("blur_end", getattr(state, "blur_end", 1.0)))
+        state.blur_exponent = float(params.get("blur_exponent", getattr(state, "blur_exponent", 2.0)))
+        state.blur_quality = int(params.get("blur_quality", getattr(state, "blur_quality", 4)))
+        state.blur_directions = int(params.get("blur_directions", getattr(state, "blur_directions", 16)))
+
+    if hasattr(state, "color"):
+        state.color.saturation = float(params.get("color_saturation", 1.0)) * 100.0
+        state.color.contrast = float(params.get("color_contrast", 1.0)) * 100.0
+        state.color.brightness = float(params.get("color_brightness", 1.0)) * 100.0
+        state.color.sepia = float(params.get("color_sepia", 0.0)) * 100.0
+    else:
+        state.color_saturation = float(params.get("color_saturation", 1.0))
+        state.color_contrast = float(params.get("color_contrast", 1.0))
+        state.color_brightness = float(params.get("color_brightness", 1.0))
+        state.color_gamma = float(params.get("color_gamma", getattr(state, "color_gamma", 1.0)))
+        state.color_grayscale = float(params.get("color_grayscale", getattr(state, "color_grayscale", 0.0)))
+        state.color_sepia = float(params.get("color_sepia", 0.0))
 
 
 def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: float, preset: str):
@@ -721,7 +822,14 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
         phase = params.get("movement_phase", 0.0)
         cycles = 1.0 if params.get("movement_loop", True) else 0.5
         
-        if hasattr(action, 'wave'):
+        if move_cls.__name__ == "Circle" and hasattr(action, 'x') and hasattr(action, 'y'):
+            action.x.amplitude = intensity
+            action.x.phase = phase
+            action.x.cycles = cycles
+            action.y.amplitude = intensity
+            action.y.phase = phase + 0.25
+            action.y.cycles = cycles
+        elif hasattr(action, 'wave'):
             action.wave.amplitude = intensity
             action.wave.phase = phase
             action.wave.cycles = cycles
@@ -786,8 +894,11 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
             state.steady = params.get("steady_depth", 0.3)
             state.isometric = params.get("isometric", 0.6)
 
+    _apply_depthflow_state_overrides(state, params)
+
     # Apply Audio Presets
     _apply_audio_preset(state, audio_val, preset, params)
+    _apply_depthflow_postfx(state, params)
 
     scene.state = state
     # Resize resolution by explicitly using keyword args to bypass upstream `resolution` setter unpacking bug
@@ -813,8 +924,10 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
         steady_depth=params.get("steady_depth", 0.3),
         isometric=params.get("isometric", 0.6)
     )
-    
+
+    _apply_depthflow_state_overrides(state, params)
     _apply_audio_preset(state, audio_val, preset, params)
+    _apply_depthflow_postfx(state, params)
 
     ssaa = params.get("ssaa", 1.0)
     ssaa_w = int(w * ssaa)
@@ -982,4 +1095,3 @@ def _gradient_color(t: float, colors: list) -> Tuple[int, int, int]:
 
 def get_total_frames(canvas: Dict[str, Any]) -> int:
     return max(1, int(canvas["duration"] * canvas["fps"]))
-
