@@ -151,8 +151,7 @@ class SF_SmoothCurve:
         for fi in range(n_frames):
             for bi in range(n_bins):
                 dynamics[bi].target = bins_data[fi, bi]
-                val = dynamics[bi].next(dt)
-                smoothed[fi, bi] = max(0.0, float(val))
+                smoothed[fi, bi] = max(0.0, dynamics[bi].next_scalar(dt))
 
         result = dict(spectrum)
         result["bins"] = smoothed
@@ -170,7 +169,7 @@ class SF_SmoothCurve:
         smoothed = []
         for v in values:
             dyn.target = v
-            smoothed.append(float(dyn.next(dt)))
+            smoothed.append(dyn.next_scalar(dt))
 
         result = dict(curve)
         result["values"] = smoothed

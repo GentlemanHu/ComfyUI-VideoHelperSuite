@@ -169,6 +169,17 @@ class DynamicNumber:
         self._value = self._value + dt * self._velocity
         return self._value
 
+    @staticmethod
+    def scalar(value) -> float:
+        """Return the first scalar from a DynamicNumber value array."""
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.size == 0:
+            return 0.0
+        return float(arr.reshape(-1)[0])
+
+    def next_scalar(self, dt: float) -> float:
+        return self.scalar(self.next(dt))
+
 
 # ---------------------------------------------------------------------------
 # FFT Spectrogram Engine (no OpenGL dependency)
@@ -1025,4 +1036,3 @@ def write_frames_to_video_with_progress(
     file_size = os.path.getsize(output_path) / (1024 * 1024)
     logger.info(f"[SF] Video saved: {output_path} ({file_size:.1f} MB)")
     return output_path
-

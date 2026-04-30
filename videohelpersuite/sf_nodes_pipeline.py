@@ -394,7 +394,7 @@ class SF_AddSpectrum:
             for fi in range(n_frames):
                 for bi in range(n_bins):
                     dynamics[bi].target = bins_data[fi, bi]
-                    bins_data[fi, bi] = max(0.0, float(dynamics[bi].next(dt)))
+                    bins_data[fi, bi] = max(0.0, dynamics[bi].next_scalar(dt))
             spectrum["bins"] = bins_data
 
         if pbar:

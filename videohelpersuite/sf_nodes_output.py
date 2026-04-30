@@ -98,7 +98,7 @@ def _prepare_layer_for_render(layer: Dict, canvas: Dict):
                 kd = np.zeros(max_note, dtype=np.float32)
                 for k in range(max_note):
                     dynamics[k].target = targets[k]
-                    kd[k] = float(dynamics[k].next(dt))
+                    kd[k] = dynamics[k].next_scalar(dt)
                 cache.append(kd)
 
             layer["_key_dynamics_cache"] = cache
