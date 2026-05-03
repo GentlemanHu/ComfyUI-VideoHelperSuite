@@ -10,6 +10,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .depthflow_adapter import (
+    apply_depth_state,
+    backend_order,
+    estimate_depth,
+    find_cuda_renderer,
+    high_quality_backend_error,
+    prepare_depth_map,
+    setup_depthflow_paths,
+    set_depth_pair,
+)
+
 logger = logging.getLogger("ShaderFlow.Modular")
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -459,39 +470,28 @@ def _setup_env_paths():
                     pass
 
 
-def _estimate_depth_simple(img_np, estimator: str = "da2"):
-    """Estimate depth map. Tries HF pipeline, falls back to luminance."""
-    import numpy as np
-    import logging
-    logger = logging.getLogger("ShaderFlow.Modular")
-    try:
-        from transformers import pipeline as hf_pipeline
-        model_ids = {
-            "da2": "depth-anything/Depth-Anything-V2-Small-hf",
-            "da1": "LiheYoung/depth-anything-small-hf",
-        }
-        model_id = model_ids.get(estimator, model_ids["da2"])
-        logger.info(f"[SF] Estimating depth with {model_id}...")
-        pipe = hf_pipeline("depth-estimation", model=model_id, device=0)
-        from PIL import Image as _PIL
-        result = pipe(_PIL.fromarray(img_np))
-        depth = np.array(result["depth"], dtype=np.float32)
-        if depth.max() > 0:
-            depth = depth / depth.max()
-        return depth
-    except Exception as e:
-        logger.warning(f"[SF] HF depth failed ({e}), using luminance fallback")
-        gray = np.mean(img_np.astype(np.float32), axis=2)
-        return 1.0 - (gray / max(gray.max(), 1.0))
+def _estimate_depth_simple(img_np, estimator: str = "da2", params: dict | None = None):
+    """Estimate depth map through the local DepthFlow estimator classes."""
+    params = params or {}
+    return estimate_depth(
+        img_np,
+        estimator,
+        model_size=params.get("depth_model_size", "small"),
+        da3_resolution=int(params.get("da3_resolution", 1024)),
+        postprocess=bool(params.get("depth_postprocess", True)),
+        sigma=params.get("depth_estimator_sigma"),
+        thicken=params.get("depth_estimator_thicken"),
+        allow_luminance_fallback=bool(params.get("allow_luminance_depth", False)),
+    )
 
 
 def _depthflow_quality_settings(params: dict) -> dict:
     """Resolve DepthFlow render quality knobs from a small profile plus overrides."""
     profile = params.get("quality_profile", "film")
     table = {
-        "fast": {"quality_pct": 70, "enable_inpaint": False, "inpaint_threshold": 3.5},
-        "balanced": {"quality_pct": 85, "enable_inpaint": True, "inpaint_threshold": 2.8},
-        "film": {"quality_pct": 96, "enable_inpaint": False, "inpaint_threshold": 2.2},
+        "fast": {"quality_pct": 80, "enable_inpaint": False, "inpaint_threshold": 3.5},
+        "balanced": {"quality_pct": 92, "enable_inpaint": False, "inpaint_threshold": 2.8},
+        "film": {"quality_pct": 100, "enable_inpaint": False, "inpaint_threshold": 2.2},
     }
     resolved = dict(table.get(profile, table["film"]))
     if "enable_inpaint" in params:
@@ -504,36 +504,8 @@ def _depthflow_quality_settings(params: dict) -> dict:
 
 
 def _normalize_depth_map(depth_np, src_img=None, sigma: float = 0.0):
-    """Normalize optional depth map without destructive dilation.
-
-    DepthFlow's reference GLSL path does not dilate depth.  Dilation makes
-    foreground silhouettes bleed into background, which is one root cause of
-    fuzzy/tearing edges.  This helper only normalizes and optionally applies a
-    light edge-preserving/gaussian smooth when explicitly requested.
-    """
-    depth = np.asarray(depth_np, dtype=np.float32)
-    if depth.ndim == 3:
-        depth = depth[:, :, 0]
-    finite = np.isfinite(depth)
-    if not finite.all():
-        depth = np.where(finite, depth, 0.0).astype(np.float32)
-    dmin, dmax = float(depth.min()), float(depth.max())
-    if dmax > dmin:
-        depth = (depth - dmin) / (dmax - dmin)
-    else:
-        depth = np.zeros_like(depth, dtype=np.float32)
-    if sigma and sigma > 0:
-        try:
-            import cv2
-            if src_img is not None and hasattr(cv2, "ximgproc"):
-                guide = np.asarray(src_img, dtype=np.uint8)
-                depth = cv2.ximgproc.guidedFilter(guide, depth, radius=max(2, int(sigma * 4)), eps=1e-3)
-            else:
-                k = max(3, int(sigma * 6) | 1)
-                depth = cv2.GaussianBlur(depth, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REPLICATE)
-        except Exception:
-            pass
-    return np.clip(depth, 0.0, 1.0).astype(np.float32)
+    """Compatibility wrapper for older callers."""
+    return prepare_depth_map(depth_np, src_img, normalize_mode="auto", smooth_sigma=sigma)
 
 
 def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
@@ -549,7 +521,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
 
     # Ensure shape alignment (Sanity Check)
     if depth_np is None:
-        depth_np = _estimate_depth_simple(src_img, params.get("depth_estimator", "da2"))
+        depth_np = _estimate_depth_simple(src_img, params.get("depth_estimator", "da2"), params)
         
     if depth_np.shape[:2] != src_img.shape[:2]:
         try:
@@ -557,7 +529,13 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             depth_np = cv2.resize(depth_np, (src_img.shape[1], src_img.shape[0]))
         except ImportError:
             pass
-    depth_np = _normalize_depth_map(depth_np, src_img, params.get("depth_smooth_sigma", 0.0))
+    depth_np = prepare_depth_map(
+        depth_np,
+        src_img,
+        normalize_mode=params.get("depth_normalize", "auto"),
+        invert_depth=params.get("input_depth_invert", 0.0),
+        smooth_sigma=params.get("depth_smooth_sigma", 0.0),
+    )
     layer["_depth_np"] = depth_np
 
     # Initialize renderer fallback chain
@@ -568,22 +546,15 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
         
         renderer = None
         cuda_mod = None
+        backend_errors = []
         
         backend_policy = params.get("backend_policy", "cuda_first")
-        allow_cpu = backend_policy in ("auto", "allow_cpu")
-        backend_order = {
-            "cuda_first": ("cuda", "opengl"),
-            "opengl_first": ("opengl", "cuda"),
-            "cuda_only": ("cuda",),
-            "opengl_only": ("opengl",),
-            "auto": ("cuda", "opengl"),
-            "allow_cpu": ("cuda", "opengl", "cpu"),
-        }.get(backend_policy, ("cuda", "opengl"))
+        allow_cpu = backend_policy == "allow_cpu"
+        order = backend_order(backend_policy)
 
-        for backend_name in backend_order:
+        for backend_name in order:
             if backend_name == "cuda" and renderer is None:
-                from .df_nodes_pipeline import _find_cuda_renderer
-                cuda_mod = _find_cuda_renderer()
+                cuda_mod = find_cuda_renderer()
                 if cuda_mod is not None and cuda_mod.is_available():
                     q = _depthflow_quality_settings(params)
                     renderer = ("cuda", cuda_mod.CudaDepthFlowRenderer(
@@ -595,11 +566,14 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
                         f"[SF] DepthFlow: CUDA renderer initialized "
                         f"(quality={q['quality_pct']}, inpaint={q['enable_inpaint']})"
                     )
+                else:
+                    backend_errors.append("CUDA renderer unavailable or torch.cuda.is_available() is false")
                 continue
 
             if backend_name == "opengl" and renderer is None:
                 try:
                     _setup_env_paths()
+                    setup_depthflow_paths()
                     import depthflow
                     from depthflow.scene import DepthScene
                     from shaderflow.scene import WindowBackend
@@ -618,6 +592,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
                     logger.info("[SF] DepthFlow: Native OpenGL initialized successfully")
                 except Exception as e:
                     logger.info(f"[SF] DepthFlow: Native OpenGL unavailable ({e})")
+                    backend_errors.append(f"OpenGL unavailable: {e}")
                 continue
 
             if backend_name == "cpu" and renderer is None:
@@ -625,11 +600,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
 
         if renderer is None:
             if not allow_cpu:
-                raise RuntimeError(
-                    "DepthFlow high-quality backend unavailable. "
-                    f"backend_policy={backend_policy}; install/fix CUDA or OpenGL, "
-                    "or set backend_policy=allow_cpu to permit low-quality fallback."
-                )
+                raise high_quality_backend_error(backend_policy, backend_errors)
             logger.warning("[SF] DepthFlow: high-quality backend unavailable, using CPU fallback")
             renderer = ("cpu", None)
 
@@ -688,54 +659,27 @@ def _apply_audio_preset(state, audio_val: float, preset: str, params: dict):
 
 def _set_depth_tuple(state, attr: str, x: float, y: float):
     """Set DepthState tuple fields on native or CUDA state objects."""
-    if hasattr(state, attr):
-        try:
-            setattr(state, attr, (float(x), float(y)))
-            return
-        except Exception:
-            pass
-    setattr(state, f"{attr}_x", float(x))
-    setattr(state, f"{attr}_y", float(y))
+    set_depth_pair(state, attr, x, y)
 
 
 def _add_depth_tuple(state, attr: str, x: float, y: float):
     """Add to tuple/vector state fields without erasing animation output."""
-    x = float(x)
-    y = float(y)
-    if hasattr(state, attr):
-        cur = getattr(state, attr)
-        try:
-            setattr(state, attr, (float(cur[0]) + x, float(cur[1]) + y))
-            return
-        except Exception:
-            pass
-    setattr(state, f"{attr}_x", float(getattr(state, f"{attr}_x", 0.0)) + x)
-    setattr(state, f"{attr}_y", float(getattr(state, f"{attr}_y", 0.0)) + y)
+    set_depth_pair(state, attr, x, y, add=True)
 
 
 def _apply_depthflow_state_overrides(state, params: dict):
     """Apply explicit DepthFlow controls shared by CUDA and OpenGL paths."""
-    height_mode = params.get("height_mode", "motion_preset")
-    if height_mode == "override":
-        state.height = float(params.get("depth_height", state.height))
-    elif height_mode == "multiply":
-        state.height *= float(params.get("depth_height", 1.0))
-
-    state.steady = float(params.get("steady_depth", state.steady))
-    state.focus = float(params.get("focus_depth", getattr(state, "focus", 0.0)))
-    state.zoom = float(params.get("zoom", getattr(state, "zoom", 1.0)))
-    state.isometric = float(params.get("isometric", getattr(state, "isometric", 0.0)))
-    state.dolly = float(params.get("dolly", getattr(state, "dolly", 0.0)))
-
-    if hasattr(state, "mirror"):
-        state.mirror = bool(params.get("mirror", state.mirror))
-    _add_depth_tuple(state, "offset", params.get("offset_x", 0.0), params.get("offset_y", 0.0))
-    _set_depth_tuple(state, "center", params.get("center_x", 0.0), params.get("center_y", 0.0))
-    _set_depth_tuple(state, "origin", params.get("origin_x", 0.0), params.get("origin_y", 0.0))
+    apply_depth_state(state, params)
 
 
 def _apply_depthflow_postfx(state, params: dict):
     """Apply DepthFlow post-processing controls to native or CUDA states."""
+    edge_mode = params.get("edge_mode", "off")
+    if hasattr(state, "inpaint"):
+        state.inpaint.limit = (
+            float(params.get("inpaint_threshold", 2.2)) if edge_mode == "mask" else 0.0
+        )
+
     vig = float(params.get("vignette_intensity", 0.0))
     if hasattr(state, "vignette"):
         state.vignette.intensity = vig
@@ -797,8 +741,8 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     try:
         from depthflow.state import DepthState
         import depthflow.animation as dfa
-    except ImportError:
-        return np.zeros((h, w, 3), dtype=np.uint8)
+    except ImportError as exc:
+        raise RuntimeError(f"DepthFlow OpenGL state import failed: {exc}") from exc
 
     state = DepthState()
     
@@ -937,13 +881,13 @@ def _render_df_frame_cuda(renderer, cuda_mod, w, h, total, frame_idx, params, au
     eff_aa = True if ssaa <= 1.0 else False
     render_kwargs = {
         "quality_pct": q["quality_pct"],
-        "enable_inpaint": q["enable_inpaint"],
+        "enable_inpaint": params.get("edge_mode", "off") == "soften" or q["enable_inpaint"],
         "inpaint_threshold": q["inpaint_threshold"],
         "enable_aa": eff_aa,
     }
     try:
         if "inpaint_mode" in inspect.signature(renderer.render_frame).parameters:
-            render_kwargs["inpaint_mode"] = "soften" if q["enable_inpaint"] else "off"
+            render_kwargs["inpaint_mode"] = "soften" if render_kwargs["enable_inpaint"] else "off"
     except (TypeError, ValueError):
         pass
     frame_tensor = renderer.render_frame(ssaa_w, ssaa_h, state, **render_kwargs)

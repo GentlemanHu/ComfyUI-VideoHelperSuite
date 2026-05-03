@@ -16,6 +16,14 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from .depthflow_adapter import (
+    apply_depth_state,
+    depth_image_to_numpy,
+    estimate_depth,
+    find_cuda_renderer,
+    prepare_depth_map,
+)
+
 logger = logging.getLogger("DepthFlow.Pipeline")
 if not logger.handlers:
     h = logging.StreamHandler()
@@ -39,49 +47,12 @@ def _clone_pipe(pipe: Dict) -> Dict:
 
 def _find_cuda_renderer():
     """Locate CudaDepthFlowRenderer module."""
-    if not HAS_TORCH or not torch.cuda.is_available():
-        return None
-    import importlib.util
-    search = [
-        Path(__file__).resolve().parent.parent / ".venv_depthflow",
-        Path(__file__).resolve().parent.parent.parent.parent / "DepthFlow",
-    ]
-    for base in search:
-        if base is None:
-            continue
-        candidates = [base / "depthflow" / "cuda_renderer.py"]
-        lib_dir = base / "lib"
-        if lib_dir.is_dir():
-            candidates.extend(lib_dir.glob("python*/site-packages/depthflow/cuda_renderer.py"))
-        for c in candidates:
-            if c.is_file():
-                spec = importlib.util.spec_from_file_location("depthflow.cuda_renderer", str(c))
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return mod
-    try:
-        from depthflow import cuda_renderer
-        return cuda_renderer
-    except ImportError:
-        return None
+    return find_cuda_renderer()
 
 
-def _estimate_depth(img_np, estimator="da2"):
-    """Estimate depth. HF pipeline → luminance fallback."""
-    try:
-        from transformers import pipeline as hf_pipe
-        ids = {"da2": "depth-anything/Depth-Anything-V2-Small-hf",
-               "da1": "LiheYoung/depth-anything-small-hf"}
-        mid = ids.get(estimator, ids["da2"])
-        logger.info(f"Estimating depth with {mid}...")
-        from PIL import Image as _PIL
-        result = hf_pipe("depth-estimation", model=mid, device=0)(_PIL.fromarray(img_np))
-        d = np.array(result["depth"], dtype=np.float32)
-        return d / max(d.max(), 1e-6)
-    except Exception as e:
-        logger.warning(f"HF depth failed ({e}), luminance fallback")
-        gray = np.mean(img_np.astype(np.float32), axis=2)
-        return 1.0 - (gray / max(gray.max(), 1.0))
+def _estimate_depth(img_np, estimator="da2", **kwargs):
+    """Estimate depth through local DepthFlow estimator classes."""
+    return estimate_depth(img_np, estimator, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +70,13 @@ class DF_Pipeline:
             },
             "optional": {
                 "depth_map": ("IMAGE", {"tooltip": "外部深度图（不传则自动估算）"}),
-                "depth_estimator": (["da2", "da1", "depthpro", "zoedepth"], {"default": "da2"}),
+                "depth_estimator": (["da2", "da1", "da3", "depthpro", "zoedepth"], {"default": "da2"}),
+                "depth_model_size": (["small", "base", "large", "giant"], {"default": "small"}),
+                "da3_resolution": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 64}),
+                "depth_postprocess": ("BOOLEAN", {"default": True}),
+                "depth_normalize": (["auto", "none", "minmax"], {"default": "auto"}),
+                "input_depth_invert": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "allow_luminance_depth": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -108,7 +85,10 @@ class DF_Pipeline:
     FUNCTION = "create"
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/DepthFlow Pipeline"
 
-    def create(self, image, depth_map=None, depth_estimator="da2"):
+    def create(self, image, depth_map=None, depth_estimator="da2",
+               depth_model_size="small", da3_resolution=1024,
+               depth_postprocess=True, depth_normalize="auto",
+               input_depth_invert=0.0, allow_luminance_depth=False):
         if HAS_TORCH and isinstance(image, torch.Tensor):
             img_np = (image[0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
         else:
@@ -117,17 +97,21 @@ class DF_Pipeline:
         # Depth
         depth_np = None
         if depth_map is not None:
-            if HAS_TORCH and isinstance(depth_map, torch.Tensor):
-                d = depth_map[0].cpu().numpy()
-            else:
-                d = np.asarray(depth_map[0])
-            if d.ndim == 3:
-                d = np.mean(d, axis=-1) if d.shape[-1] in (3, 4) else d[:, :, 0]
-            depth_np = d.astype(np.float32)
-            if depth_np.max() > 1.5:
-                depth_np = depth_np / 255.0
+            depth_np = depth_image_to_numpy(depth_map)
         else:
-            depth_np = _estimate_depth(img_np, depth_estimator)
+            depth_np = _estimate_depth(
+                img_np, depth_estimator,
+                model_size=depth_model_size,
+                da3_resolution=da3_resolution,
+                postprocess=depth_postprocess,
+                allow_luminance_fallback=allow_luminance_depth,
+            )
+        depth_np = prepare_depth_map(
+            depth_np,
+            img_np,
+            normalize_mode=depth_normalize,
+            invert_depth=input_depth_invert,
+        )
 
         h, w = img_np.shape[:2]
         pipe = {
@@ -362,8 +346,8 @@ class DF_Render:
                 "height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
                 "fps": ("INT", {"default": 30, "min": 1, "max": 120}),
                 "duration": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 120.0, "step": 0.1}),
-                "ssaa": ("FLOAT", {"default": 1.25, "min": 0.5, "max": 2.0, "step": 0.25}),
-                "quality": ("INT", {"default": 96, "min": 1, "max": 100}),
+                "ssaa": ("FLOAT", {"default": 2.0, "min": 0.5, "max": 4.0, "step": 0.25}),
+                "quality": ("INT", {"default": 100, "min": 1, "max": 100}),
                 "codec": (["h264", "h264-nvenc", "h265", "h265-nvenc"], {"default": "h264"}),
                 "output_format": (["mp4", "mkv", "webm"], {"default": "mp4"}),
                 "output_prefix": ("STRING", {"default": "df_pipe_"}),
@@ -382,7 +366,7 @@ class DF_Render:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/DepthFlow Pipeline"
 
     def render(self, pipeline, width=0, height=0, fps=30, duration=5.0,
-               ssaa=1.0, quality=80, codec="h264", output_format="mp4",
+               ssaa=2.0, quality=100, codec="h264", output_format="mp4",
                output_prefix="df_pipe_", output_frames=False,
                enable_inpaint=False, inpaint_threshold=2.2, enable_aa=True):
         import folder_paths
@@ -424,12 +408,10 @@ class DF_Render:
                 output_frames,
             )
         else:
-            # Fallback: use render_video via existing DepthFlowGenerator
-            logger.info("DF Render: fallback to subprocess")
-            frames_tensor = self._render_subprocess(
-                img_np, depth_np, rw, rh, fps, duration, ssaa,
-                quality, codec, output_format, out_path, total_frames,
-                motion,
+            raise RuntimeError(
+                "DepthFlow CUDA renderer unavailable. This node does not use a "
+                "silent low-quality fallback; use SF Add DepthFlow with "
+                "backend_policy=opengl_first or allow_cpu if needed."
             )
 
         final_path = os.path.abspath(out_path)
@@ -495,20 +477,22 @@ class DF_Render:
                     steady_depth=state_cfg.get("steady", 0.15),
                     isometric=state_cfg.get("isometric", 0.0),
                 )
-                # Override with user state settings
-                state.height = state_cfg.get("height", state.height)
-                state.steady = state_cfg.get("steady", state.steady)
-                state.focus = state_cfg.get("focus", state.focus)
-                state.zoom = state_cfg.get("zoom", state.zoom)
-                state.isometric = state_cfg.get("isometric", state.isometric)
-                state.dolly = state_cfg.get("dolly", state.dolly)
-                state.mirror = state_cfg.get("mirror", state.mirror)
-                state.offset_x = state_cfg.get("offset_x", state.offset_x)
-                state.offset_y = state_cfg.get("offset_y", state.offset_y)
-                state.center_x = state_cfg.get("center_x", state.center_x)
-                state.center_y = state_cfg.get("center_y", state.center_y)
-                state.origin_x = state_cfg.get("origin_x", state.origin_x)
-                state.origin_y = state_cfg.get("origin_y", state.origin_y)
+                apply_depth_state(state, {
+                    "height_mode": "override",
+                    "depth_height": state_cfg.get("height", state.height),
+                    "steady_depth": state_cfg.get("steady", state.steady),
+                    "focus_depth": state_cfg.get("focus", state.focus),
+                    "zoom": state_cfg.get("zoom", state.zoom),
+                    "isometric": state_cfg.get("isometric", state.isometric),
+                    "dolly": state_cfg.get("dolly", state.dolly),
+                    "mirror": state_cfg.get("mirror", state.mirror),
+                    "offset_x": state_cfg.get("offset_x", 0.0),
+                    "offset_y": state_cfg.get("offset_y", 0.0),
+                    "center_x": state_cfg.get("center_x", 0.0),
+                    "center_y": state_cfg.get("center_y", 0.0),
+                    "origin_x": state_cfg.get("origin_x", 0.0),
+                    "origin_y": state_cfg.get("origin_y", 0.0),
+                })
 
                 # Apply PostFX to state
                 pfx = postfx

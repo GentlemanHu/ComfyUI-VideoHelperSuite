@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .depthflow_adapter import depth_image_to_numpy
 from .sf_core import (
     T_SF_AUDIO, T_SF_SPECTRUM, T_SF_CURVE, T_SF_MIDI,
     T_SF_CANVAS, T_SF_LAYER, T_SF_PIPELINE,
@@ -878,8 +879,32 @@ class SF_AddDepthFlow:
                 "depth_map": ("IMAGE", {
                     "tooltip": "外部深度图（不提供则自动估算）",
                 }),
-                "depth_estimator": (["da2", "da1", "depthpro", "zoedepth"], {
+                "depth_estimator": (["da2", "da1", "da3", "depthpro", "zoedepth"], {
                     "default": "da2",
+                }),
+                "depth_model_size": (["small", "base", "large", "giant"], {
+                    "default": "small",
+                    "tooltip": "Depth Anything 模型尺寸；giant 仅 da3 支持",
+                }),
+                "da3_resolution": ("INT", {
+                    "default": 1024, "min": 256, "max": 2048, "step": 64,
+                    "tooltip": "Depth Anything V3 推理分辨率",
+                }),
+                "depth_postprocess": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "使用 DepthFlow 官方 estimator 后处理",
+                }),
+                "depth_estimator_sigma": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 3.0, "step": 0.1,
+                    "tooltip": "0 表示使用 estimator 默认 sigma",
+                }),
+                "depth_estimator_thicken": ("INT", {
+                    "default": 0, "min": 0, "max": 15,
+                    "tooltip": "0 表示使用 estimator 默认 thicken",
+                }),
+                "allow_luminance_depth": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "估深失败时允许亮度伪深度；关闭可避免静默低质结果",
                 }),
                 "movement_smooth": ("BOOLEAN", {"default": True}),
                 "movement_loop": ("BOOLEAN", {"default": True}),
@@ -906,11 +931,15 @@ class SF_AddDepthFlow:
                 "origin_y": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
                 "mirror": ("BOOLEAN", {"default": True, "tooltip": "DepthFlow原生镜像边缘采样"}),
                 "ssaa": ("FLOAT", {
-                    "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.25,
+                    "default": 2.0, "min": 0.5, "max": 4.0, "step": 0.25,
                 }),
                 "quality_profile": (["fast", "balanced", "film"], {
                     "default": "film",
-                    "tooltip": "DepthFlow CUDA/OpenGL质量档；film默认开启更高质量与边缘软化",
+                    "tooltip": "DepthFlow CUDA/OpenGL质量档；film默认高质量且不做非官方模糊",
+                }),
+                "quality_pct": ("FLOAT", {
+                    "default": 100.0, "min": 1.0, "max": 100.0, "step": 1.0,
+                    "tooltip": "DepthFlow ray-march 质量；100 最接近参考路径",
                 }),
                 "backend_policy": (["auto", "cuda_first", "opengl_first", "cuda_only", "opengl_only", "allow_cpu"], {
                     "default": "cuda_first",
@@ -918,11 +947,23 @@ class SF_AddDepthFlow:
                 }),
                 "enable_inpaint": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "非GLSL边缘软化；关闭时CUDA更严格对齐DepthFlow OpenGL/GLSL",
+                    "tooltip": "兼容旧工作流：开启时等同 edge_mode=soften",
+                }),
+                "edge_mode": (["off", "soften", "mask"], {
+                    "default": "off",
+                    "tooltip": "off=还原优先，soften=CUDA边缘软化，mask=OpenGL绿色inpaint遮罩",
                 }),
                 "inpaint_threshold": ("FLOAT", {
                     "default": 2.2, "min": 1.0, "max": 8.0, "step": 0.1,
                     "tooltip": "边缘软化阈值；越低越强",
+                }),
+                "depth_normalize": (["auto", "none", "minmax"], {
+                    "default": "auto",
+                    "tooltip": "外部深度图归一化策略；none尽量保留原图数值",
+                }),
+                "input_depth_invert": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "输入深度图预反转；不修改 DepthFlow GLSL/DepthState",
                 }),
                 "depth_smooth_sigma": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 3.0, "step": 0.1,
@@ -968,14 +1009,19 @@ class SF_AddDepthFlow:
     def add(self, pipeline, camera_movement, movement_intensity,
             steady_depth, isometric,
             depth_map=None, depth_estimator="da2",
+            depth_model_size="small", da3_resolution=1024,
+            depth_postprocess=True, depth_estimator_sigma=0.0,
+            depth_estimator_thicken=0, allow_luminance_depth=False,
             movement_smooth=True, movement_loop=True,
             movement_reverse=False, movement_phase=0.0,
             height_mode="motion_preset", depth_height=0.2, focus_depth=0.0,
             zoom=1.0, dolly=0.0, offset_x=0.0, offset_y=0.0,
             center_x=0.0, center_y=0.0, origin_x=0.0, origin_y=0.0,
             mirror=True,
-            ssaa=1.0, quality_profile="film", backend_policy="cuda_first",
-            enable_inpaint=False, inpaint_threshold=2.2, depth_smooth_sigma=0.0,
+            ssaa=2.0, quality_profile="film", quality_pct=100.0,
+            backend_policy="cuda_first",
+            enable_inpaint=False, edge_mode="off", inpaint_threshold=2.2,
+            depth_normalize="auto", input_depth_invert=0.0, depth_smooth_sigma=0.0,
             vignette_intensity=0.0, vignette_decay=20.0,
             lens_intensity=0.0, lens_decay=0.4, lens_quality=30,
             blur_intensity=0.0, blur_start=0.6, blur_end=1.0,
@@ -996,18 +1042,12 @@ class SF_AddDepthFlow:
         # Process depth map
         depth_np = None
         if depth_map is not None:
-            if HAS_TORCH and isinstance(depth_map, torch.Tensor):
-                d = depth_map.cpu().numpy()
-            else:
-                d = np.asarray(depth_map)
-            if d.ndim == 4:
-                d = d[0]
-            if d.ndim == 3:
-                d = np.mean(d, axis=-1) if d.shape[-1] in (3, 4) else d[:, :, 0]
-            depth_np = d.astype(np.float32)
-            if depth_np.max() > 1.5:
-                depth_np = depth_np / 255.0
+            depth_np = depth_image_to_numpy(depth_map)
             logger.info(f"[SF Pipeline] DepthFlow: using provided depth map {depth_np.shape}")
+
+        sigma = None if depth_estimator_sigma <= 0 else depth_estimator_sigma
+        thicken = None if depth_estimator_thicken <= 0 else depth_estimator_thicken
+        resolved_edge_mode = "soften" if enable_inpaint and edge_mode == "off" else edge_mode
 
         layer = {
             "type": "depthflow",
@@ -1034,11 +1074,21 @@ class SF_AddDepthFlow:
                 "mirror": mirror,
                 "ssaa": ssaa,
                 "quality_profile": quality_profile,
+                "quality_pct": quality_pct,
                 "backend_policy": backend_policy,
                 "enable_inpaint": enable_inpaint,
+                "edge_mode": resolved_edge_mode,
                 "inpaint_threshold": inpaint_threshold,
+                "depth_normalize": depth_normalize,
+                "input_depth_invert": input_depth_invert,
                 "depth_smooth_sigma": depth_smooth_sigma,
                 "depth_estimator": depth_estimator,
+                "depth_model_size": depth_model_size,
+                "da3_resolution": da3_resolution,
+                "depth_postprocess": depth_postprocess,
+                "depth_estimator_sigma": sigma,
+                "depth_estimator_thicken": thicken,
+                "allow_luminance_depth": allow_luminance_depth,
                 "vignette_intensity": vignette_intensity,
                 "vignette_decay": vignette_decay,
                 "lens_intensity": lens_intensity,
