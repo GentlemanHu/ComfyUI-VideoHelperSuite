@@ -19,7 +19,7 @@ from huggingface_hub import hf_hub_download
 
 import folder_paths
 
-from .sharp_camera_path import sample_keyframe_eye
+from .sharp_camera_path import sample_keyframe_eye, target_position
 
 
 logger = logging.getLogger("VHS.SHARP")
@@ -578,7 +578,8 @@ def _official_extrinsics(scene: SharpScene, rig: dict[str, Any], t: float, width
     mode = "ahead" if str(rig.get("lookat_mode", "point")) == "ahead" else "point"
     origin = eye if mode == "ahead" else torch.zeros(3, dtype=torch.float32, device=device)
     focus = _depth_focus(scene, device)
-    look_at = origin + torch.tensor([0.0, 0.0, focus], dtype=torch.float32, device=device)
+    offset_xyz = _max_eye_offset(scene, width, height, float(rig.get("amplitude", 1.0)), float(rig.get("radius_scale", 1.0)))
+    look_at = origin + torch.tensor(target_position(rig, offset_xyz, focus), dtype=torch.float32, device=device)
     world_up = torch.tensor([0.0, -1.0, 0.0], dtype=torch.float32, device=device)
     return _camera_matrix(eye, look_at, world_up, inverse=True)
 

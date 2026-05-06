@@ -20,6 +20,7 @@ from .utils import ffmpeg_path
 
 T_SHARP_SCENE = "VHS_SHARP_SCENE"
 T_SHARP_CAMERA = "VHS_SHARP_CAMERA"
+TARGET_ANCHORS = ["center", "foreground", "background", "left", "right", "top", "bottom", "custom"]
 
 CAMERA_PRESETS = [
     "official_rotate_forward",
@@ -423,6 +424,10 @@ class VHSSharpCameraPath:
                 "interpolation": (["smooth", "linear"], {"default": "smooth"}),
                 "loop": ("BOOLEAN", {"default": False}),
                 "lookat_mode": (["point", "ahead"], {"default": "point"}),
+                "target_anchor": (TARGET_ANCHORS, {"default": "center"}),
+                "target_x": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "target_y": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "target_z": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
                 "amplitude": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01}),
                 "radius_scale": ("FLOAT", {"default": 1.0, "min": 0.2, "max": 5.0, "step": 0.01}),
             },
@@ -440,6 +445,10 @@ class VHSSharpCameraPath:
         interpolation="smooth",
         loop=False,
         lookat_mode="point",
+        target_anchor="center",
+        target_x=0.0,
+        target_y=0.0,
+        target_z=0.0,
         amplitude=1.0,
         radius_scale=1.0,
     ):
@@ -451,6 +460,10 @@ class VHSSharpCameraPath:
             "interpolation": str(interpolation),
             "loop": bool(loop),
             "lookat_mode": str(lookat_mode),
+            "target_anchor": str(target_anchor),
+            "target_x": float(target_x),
+            "target_y": float(target_y),
+            "target_z": float(target_z),
             "amplitude": float(amplitude),
             "radius_scale": float(radius_scale),
         }
@@ -667,3 +680,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_SHARP_RenderVideo": "SHARP Render Video 🍎🎥🅥🅗🅢",
     "VHS_SHARP_ImageToVideo": "SHARP Image To Video 🍎🎥🅥🅗🅢",
 }
+
+try:
+    from .sharp_videoops_extra_nodes import (
+        NODE_CLASS_MAPPINGS as EXTRA_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as EXTRA_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(EXTRA_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(EXTRA_DISPLAY_NAME_MAPPINGS)
+except Exception as exc:
+    print(f"SHARP VideoOps extra nodes not available: {exc}")

@@ -74,14 +74,28 @@ function writePath(node, points) {
     node.setDirtyCanvas?.(true, true);
 }
 
-function drawEditor(canvas, points, activeIndex, isRecording) {
+function widgetValue(node, name, fallback) {
+    const widget = findWidget(node, name);
+    return widget ? widget.value : fallback;
+}
+
+function setWidgetValue(node, name, value) {
+    const widget = findWidget(node, name);
+    if (!widget) {
+        return;
+    }
+    widget.value = value;
+    widget.callback?.(value);
+}
+
+function drawEditor(canvas, points, activeIndex, isRecording, mode, target) {
     const ctx = canvas.getContext("2d");
     const width = canvas.width;
     const height = canvas.height;
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = "#111827";
     ctx.fillRect(0, 0, width, height);
-    ctx.strokeStyle = "#334155";
+    ctx.strokeStyle = "#253247";
     ctx.lineWidth = 1;
     for (let i = 1; i < 4; i++) {
         ctx.beginPath();
@@ -91,18 +105,42 @@ function drawEditor(canvas, points, activeIndex, isRecording) {
         ctx.lineTo(width, (height * i) / 4);
         ctx.stroke();
     }
-    ctx.strokeStyle = "#94a3b8";
+    const toCanvas = (p) => {
+        const depth = Number(p.z || 0);
+        return {
+            x: width / 2 + (Number(p.x || 0) + depth * 0.22) * width * 0.24,
+            y: height / 2 - (Number(p.y || 0) - depth * 0.12) * height * 0.24,
+            s: 1 + depth * 0.18,
+        };
+    };
+    const cube = [
+        { x: -0.35, y: -0.35, z: -0.2 }, { x: 0.35, y: -0.35, z: -0.2 },
+        { x: 0.35, y: 0.35, z: -0.2 }, { x: -0.35, y: 0.35, z: -0.2 },
+        { x: -0.25, y: -0.25, z: 0.35 }, { x: 0.25, y: -0.25, z: 0.35 },
+        { x: 0.25, y: 0.25, z: 0.35 }, { x: -0.25, y: 0.25, z: 0.35 },
+    ].map(toCanvas);
+    const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    ctx.strokeStyle = "#475569";
+    ctx.lineWidth = 1.5;
+    for (const [a, b] of edges) {
+        ctx.beginPath();
+        ctx.moveTo(cube[a].x, cube[a].y);
+        ctx.lineTo(cube[b].x, cube[b].y);
+        ctx.stroke();
+    }
+    const targetPoint = toCanvas(target);
+    ctx.strokeStyle = "#facc15";
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(width / 2, 0);
-    ctx.lineTo(width / 2, height);
-    ctx.moveTo(0, height / 2);
-    ctx.lineTo(width, height / 2);
+    ctx.moveTo(targetPoint.x - 8, targetPoint.y);
+    ctx.lineTo(targetPoint.x + 8, targetPoint.y);
+    ctx.moveTo(targetPoint.x, targetPoint.y - 8);
+    ctx.lineTo(targetPoint.x, targetPoint.y + 8);
     ctx.stroke();
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "11px sans-serif";
+    ctx.fillText(`3D path ${mode}`, 8, 15);
 
-    const toCanvas = (p) => ({
-        x: width / 2 + p.x * width * 0.24,
-        y: height / 2 - p.y * height * 0.24,
-    });
     ctx.lineWidth = 2;
     ctx.strokeStyle = isRecording ? "#22c55e" : "#38bdf8";
     ctx.beginPath();
@@ -119,7 +157,7 @@ function drawEditor(canvas, points, activeIndex, isRecording) {
         const c = toCanvas(p);
         ctx.fillStyle = index === activeIndex ? "#f97316" : "#e2e8f0";
         ctx.beginPath();
-        ctx.arc(c.x, c.y, index === activeIndex ? 5 : 4, 0, Math.PI * 2);
+        ctx.arc(c.x, c.y, (index === activeIndex ? 5 : 4) * Math.max(0.65, c.s), 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = "#cbd5e1";
         ctx.font = "10px sans-serif";
@@ -151,6 +189,33 @@ function installCameraPathEditor(node) {
     canvas.style.borderRadius = "4px";
     root.appendChild(canvas);
 
+    const modeRow = document.createElement("div");
+    modeRow.style.display = "grid";
+    modeRow.style.gridTemplateColumns = "1fr 1fr";
+    modeRow.style.gap = "4px";
+    root.appendChild(modeRow);
+    const modeSelect = document.createElement("select");
+    for (const name of ["orbit", "pan", "dolly", "anchor"]) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        modeSelect.appendChild(opt);
+    }
+    modeRow.appendChild(modeSelect);
+    const anchorSelect = document.createElement("select");
+    for (const name of ["center", "foreground", "background", "left", "right", "top", "bottom", "custom"]) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = `anchor ${name}`;
+        anchorSelect.appendChild(opt);
+    }
+    anchorSelect.value = widgetValue(node, "target_anchor", "center");
+    anchorSelect.onchange = () => {
+        setWidgetValue(node, "target_anchor", anchorSelect.value);
+        refresh();
+    };
+    modeRow.appendChild(anchorSelect);
+
     const controls = document.createElement("div");
     controls.style.display = "grid";
     controls.style.gridTemplateColumns = "repeat(4, 1fr)";
@@ -170,7 +235,12 @@ function installCameraPathEditor(node) {
     let recording = false;
     let recordStart = 0;
 
-    const refresh = () => drawEditor(canvas, points, activeIndex, recording);
+    const getTarget = () => ({
+        x: Number(widgetValue(node, "target_x", 0)),
+        y: Number(widgetValue(node, "target_y", 0)),
+        z: Number(widgetValue(node, "target_z", 0)),
+    });
+    const refresh = () => drawEditor(canvas, points, activeIndex, recording, modeSelect.value, getTarget());
     const sync = () => {
         writePath(node, points);
         refresh();
@@ -212,18 +282,35 @@ function installCameraPathEditor(node) {
         points = points.map((p) => ({ ...p, x: -p.x }));
         sync();
     });
+    button("Anchor", () => {
+        modeSelect.value = "anchor";
+        setWidgetValue(node, "target_anchor", "custom");
+        anchorSelect.value = "custom";
+        refresh();
+    });
 
     function pointerToPoint(event) {
         const rect = canvas.getBoundingClientRect();
-        return {
-            x: clamp(((event.clientX - rect.left) / rect.width - 0.5) / 0.24, -2, 2),
-            y: clamp((0.5 - (event.clientY - rect.top) / rect.height) / 0.24, -2, 2),
-            z: Number(zInput.value),
-        };
+        const rawX = clamp(((event.clientX - rect.left) / rect.width - 0.5) / 0.24, -2, 2);
+        const rawY = clamp((0.5 - (event.clientY - rect.top) / rect.height) / 0.24, -2, 2);
+        const current = points[activeIndex] || { t: 0.5, x: 0, y: 0, z: 0 };
+        if (modeSelect.value === "dolly") {
+            return { x: current.x, y: current.y, z: clamp(rawY, -2, 2) };
+        }
+        return { x: rawX, y: rawY, z: Number(zInput.value) };
     }
 
     function updateFromPointer(event) {
         const p = pointerToPoint(event);
+        if (modeSelect.value === "anchor") {
+            setWidgetValue(node, "target_anchor", "custom");
+            setWidgetValue(node, "target_x", p.x);
+            setWidgetValue(node, "target_y", p.y);
+            setWidgetValue(node, "target_z", p.z);
+            anchorSelect.value = "custom";
+            refresh();
+            return;
+        }
         if (recording) {
             const elapsed = clamp((performance.now() - recordStart) / 4000, 0, 1);
             const previous = points[points.length - 1];
@@ -258,6 +345,7 @@ function installCameraPathEditor(node) {
     canvas.addEventListener("wheel", (event) => {
         event.preventDefault();
         zInput.value = String(clamp(Number(zInput.value) - event.deltaY * 0.001, -1, 1));
+        refresh();
     }, { passive: false });
 
     pathWidget.callback = ((original) => function () {

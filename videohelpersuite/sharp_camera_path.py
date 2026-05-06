@@ -43,3 +43,26 @@ def sample_keyframe_eye(rig: dict[str, Any], t: float, offset_xyz: np.ndarray) -
         float(selected[1]) * float(offset_xyz[1]) * scale,
         float(selected[2]) * float(offset_xyz[2]) * scale,
     ]
+
+
+def target_position(rig: dict[str, Any], offset_xyz: np.ndarray, focus: float) -> list[float]:
+    anchors = {
+        "center": (0.0, 0.0, 0.0),
+        "left": (-0.35, 0.0, 0.0),
+        "right": (0.35, 0.0, 0.0),
+        "top": (0.0, 0.25, 0.0),
+        "bottom": (0.0, -0.25, 0.0),
+        "foreground": (0.0, 0.0, -0.35),
+        "background": (0.0, 0.0, 0.35),
+        "custom": (
+            float(rig.get("target_x", 0.0)),
+            float(rig.get("target_y", 0.0)),
+            float(rig.get("target_z", 0.0)),
+        ),
+    }
+    anchor = anchors.get(str(rig.get("target_anchor", "center")), anchors["center"])
+    return [
+        float(anchor[0]) * float(offset_xyz[0]),
+        float(anchor[1]) * float(offset_xyz[1]),
+        float(focus) + float(anchor[2]) * float(offset_xyz[2]),
+    ]
