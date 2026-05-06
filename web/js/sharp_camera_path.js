@@ -187,23 +187,40 @@ function installCameraPathEditor(node) {
     root.style.border = "1px solid #334155";
     root.style.borderRadius = "6px";
     root.style.boxSizing = "border-box";
-    root.style.height = "304px";
+    root.style.height = "32px";
     root.style.overflow = "hidden";
+
+    const header = document.createElement("button");
+    header.textContent = "Open Path Editor";
+    header.style.padding = "4px 8px";
+    header.style.borderRadius = "4px";
+    header.style.border = "1px solid #475569";
+    header.style.background = "#1e293b";
+    header.style.color = "#e2e8f0";
+    header.style.textAlign = "left";
+    header.style.lineHeight = "16px";
+    root.appendChild(header);
+
+    const panel = document.createElement("div");
+    panel.style.display = "none";
+    panel.style.flexDirection = "column";
+    panel.style.gap = "6px";
+    root.appendChild(panel);
 
     const canvas = document.createElement("canvas");
     canvas.width = 320;
     canvas.height = 180;
     canvas.style.width = "100%";
-    canvas.style.height = "176px";
+    canvas.style.height = "144px";
     canvas.style.cursor = "crosshair";
     canvas.style.borderRadius = "4px";
-    root.appendChild(canvas);
+    panel.appendChild(canvas);
 
     const modeRow = document.createElement("div");
     modeRow.style.display = "grid";
     modeRow.style.gridTemplateColumns = "1fr 1fr";
     modeRow.style.gap = "4px";
-    root.appendChild(modeRow);
+    panel.appendChild(modeRow);
     const modeSelect = document.createElement("select");
     for (const name of ["orbit", "pan", "dolly", "anchor"]) {
         const opt = document.createElement("option");
@@ -230,7 +247,7 @@ function installCameraPathEditor(node) {
     controls.style.display = "grid";
     controls.style.gridTemplateColumns = "repeat(4, 1fr)";
     controls.style.gap = "4px";
-    root.appendChild(controls);
+    panel.appendChild(controls);
 
     const zInput = document.createElement("input");
     zInput.type = "range";
@@ -238,7 +255,7 @@ function installCameraPathEditor(node) {
     zInput.max = "1";
     zInput.step = "0.01";
     zInput.value = "0";
-    root.appendChild(zInput);
+    panel.appendChild(zInput);
 
     let points = parsePath(pathWidget.value);
     let activeIndex = 0;
@@ -371,7 +388,18 @@ function installCameraPathEditor(node) {
         serialize: false,
         hideOnZoom: false,
     });
-    editorWidget.computeSize = (width) => [width, 312];
+    let expanded = false;
+    const setExpanded = (value) => {
+        expanded = Boolean(value);
+        panel.style.display = expanded ? "flex" : "none";
+        root.style.height = expanded ? "256px" : "32px";
+        header.textContent = expanded ? "Close Path Editor" : "Open Path Editor";
+        node.setSize([Math.max(node.size[0], 380), node.computeSize()[1]]);
+        node.setDirtyCanvas?.(true, true);
+        refresh();
+    };
+    header.onclick = () => setExpanded(!expanded);
+    editorWidget.computeSize = (width) => [width, expanded ? 264 : 40];
     node.setSize([Math.max(node.size[0], 380), node.computeSize()[1]]);
     refresh();
 }
