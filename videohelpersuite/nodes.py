@@ -3084,3 +3084,29 @@ if HAS_CUSTOM_FEATURES:
         print(f"DepthFlow Pipeline: {len(DFP_CM)} nodes registered")
     except Exception as e:
         print(f"DepthFlow Pipeline nodes not available: {e}")
+
+    # Try to add Apple SHARP VideoOps nodes (independent from DepthFlow)
+    try:
+        from .sharp_videoops_nodes import (
+            NODE_CLASS_MAPPINGS as SHARP_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SHARP_DN,
+        )
+        NODE_CLASS_MAPPINGS.update(SHARP_CM)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SHARP_DN)
+        print(f"SHARP VideoOps: {len(SHARP_CM)} nodes registered")
+    except Exception as e:
+        print(f"SHARP VideoOps nodes not available: {e}")
+
+# SHARP VideoOps should remain available even when unrelated optional VHS
+# modules fail to import and HAS_CUSTOM_FEATURES is false.
+if "VHS_SHARP_ImageToVideo" not in NODE_CLASS_MAPPINGS:
+    try:
+        from .sharp_videoops_nodes import (
+            NODE_CLASS_MAPPINGS as SHARP_CM,
+            NODE_DISPLAY_NAME_MAPPINGS as SHARP_DN,
+        )
+        NODE_CLASS_MAPPINGS.update(SHARP_CM)
+        NODE_DISPLAY_NAME_MAPPINGS.update(SHARP_DN)
+        print(f"SHARP VideoOps: {len(SHARP_CM)} nodes registered")
+    except Exception as e:
+        print(f"SHARP VideoOps nodes not available: {e}")
