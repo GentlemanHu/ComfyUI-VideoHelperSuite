@@ -1038,9 +1038,7 @@ class DepthFlowGenerator:
             "-t", str(duration),
             "-f", str(fps),
             "-s", str(ssaa),
-            "-r",  # Render mode
             "-o", output_path,
-            "--format", output_format,
         ])
         
         # Set environment variables for headless / cross-platform rendering
