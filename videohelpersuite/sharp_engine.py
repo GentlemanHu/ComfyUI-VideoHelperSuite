@@ -4,6 +4,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import platform
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +40,7 @@ _encode_cache: dict[str, Any] = {
 }
 _gsplat_warning_emitted = False
 _gsplat_info_emitted = False
+_gsplat_install_attempted = False
 
 
 @dataclass
@@ -430,6 +434,37 @@ def _background_name(background: tuple[float, float, float]) -> str:
     return "black"
 
 
+def _static_source_frame(scene: SharpScene, width: int, height: int, device: torch.device, exposure: float) -> torch.Tensor:
+    src = scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0)
+    resized = F.interpolate(src, size=(int(height), int(width)), mode="bilinear", align_corners=False)
+    canvas = resized[0].permute(1, 2, 0).clamp(0, 1)
+    return (canvas * float(exposure)).clamp(0, 1).detach().cpu()
+
+
+def _import_gsplat_with_optional_install():
+    global _gsplat_install_attempted
+    try:
+        import gsplat
+        return gsplat
+    except Exception as first_exc:
+        if _gsplat_install_attempted or platform.system() != "Linux" or not torch.cuda.is_available():
+            raise first_exc
+        _gsplat_install_attempted = True
+        log_info("Official gsplat renderer missing; attempting automatic install: gsplat==1.5.3")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "gsplat==1.5.3"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=900,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stdout[-4000:]) from first_exc
+        import gsplat
+        log_info("Official gsplat renderer installed; restart ComfyUI if import/cache issues appear.")
+        return gsplat
+
+
 def _sharp_intrinsics(scene: SharpScene, width: int, height: int, device: torch.device) -> torch.Tensor:
     src_w, src_h = scene.source_size
     fx = float(scene.focal_px) * float(width) / max(float(src_w), 1.0)
@@ -494,8 +529,17 @@ def _official_eye_position(scene: SharpScene, rig: dict[str, Any], t: float, wid
     pitch_delta = np.deg2rad(float(rig.get("pitch_delta", 0.0)) * float(t))
     radius_delta = float(rig.get("radius_delta", 0.0)) * float(t)
 
-    if preset in {"cinematic_orbit", "hero_parallax"}:
+    if preset in {"official_rotate_forward", "cinematic_orbit", "hero_parallax"}:
         eye = [offset_x * np.sin(phase), 0.0, offset_z * (1.0 - np.cos(phase)) * 0.5]
+    elif preset == "official_rotate":
+        eye = [offset_x * np.sin(phase), offset_y * np.cos(phase), 0.0]
+    elif preset == "official_swipe":
+        eye = [offset_x * (2.0 * t - 1.0), 0.0, 0.0]
+    elif preset == "official_shake":
+        if float(t) < 0.5:
+            eye = [offset_x * np.sin(4.0 * np.pi * t), 0.0, 0.0]
+        else:
+            eye = [0.0, offset_y * np.sin(4.0 * np.pi * (t - 0.5)), 0.0]
     elif preset == "micro_float":
         eye = [offset_x * 0.45 * np.sin(phase), offset_y * 0.35 * np.sin(phase * 0.7), offset_z * 0.25 * (1.0 - np.cos(phase))]
     elif preset == "turntable":
@@ -550,7 +594,7 @@ def _render_frame_gsplat(
             _gsplat_warning_emitted = True
         return None
     try:
-        import gsplat
+        gsplat = _import_gsplat_with_optional_install()
         from .apple_sharp import color_space as cs_utils
     except Exception as exc:
         if not _gsplat_warning_emitted:
@@ -607,42 +651,6 @@ def _render_frame_gsplat(
     return out[0].permute(1, 2, 0).clamp(0, 1).detach().cpu()
 
 
-def _render_photo_warp_fallback(
-    scene: SharpScene,
-    rig: dict[str, Any],
-    t: float,
-    width: int,
-    height: int,
-    device: torch.device,
-    exposure: float,
-    gamma: float,
-) -> torch.Tensor:
-    src = scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0)
-    resized = F.interpolate(src, size=(int(height), int(width)), mode="bilinear", align_corners=False)
-    yy, xx = torch.meshgrid(
-        torch.linspace(-1.0, 1.0, int(height), dtype=torch.float32, device=device),
-        torch.linspace(-1.0, 1.0, int(width), dtype=torch.float32, device=device),
-        indexing="ij",
-    )
-    eye = _official_eye_position(scene, rig, t, width, height, device)
-    focus = max(_depth_focus(scene, device), 1e-3)
-    parallax_x = (eye[0] / focus).clamp(-0.2, 0.2)
-    parallax_y = (eye[1] / focus).clamp(-0.2, 0.2)
-    radial = (xx.square() + yy.square()).sqrt().clamp(0, 1)
-    depth_proxy = 0.25 + 0.75 * radial
-    grid = torch.stack(
-        [
-            xx + parallax_x * depth_proxy * 1.6,
-            yy - parallax_y * depth_proxy * 1.6,
-        ],
-        dim=-1,
-    ).unsqueeze(0)
-    warped = F.grid_sample(resized, grid, mode="bilinear", padding_mode="border", align_corners=True)
-    canvas = warped[0].permute(1, 2, 0).clamp(0, 1)
-    canvas = (canvas * float(exposure)).clamp(0, 1)
-    return canvas.detach().cpu()
-
-
 def render_frame(
     scene: SharpScene,
     rig: dict[str, Any],
@@ -660,14 +668,23 @@ def render_frame(
     render_mode: str = "photo_composite",
     source_photo_strength: float = 0.85,
 ) -> torch.Tensor:
+    device = render_device(render_backend)
+    mode = str(render_mode or "photo_composite").lower()
+    if mode == "source_static":
+        return _static_source_frame(scene, width, height, device, exposure)
+
     gsplat_frame = _render_frame_gsplat(scene, rig, t, width, height, background, render_backend, render_mode)
     if gsplat_frame is not None:
         canvas = (gsplat_frame * float(exposure)).clamp(0, 1)
         return canvas.clamp(0, 1)
 
-    device = render_device(render_backend)
-    if str(render_mode or "photo_composite").lower() == "photo_composite":
-        return _render_photo_warp_fallback(scene, rig, t, width, height, device, exposure, gamma)
+    if mode == "photo_composite":
+        raise RuntimeError(
+            "SHARP official video rendering requires CUDA + gsplat. "
+            "The previous photo-warp fallback was removed because it produces distorted fake motion. "
+            "Check console for 'Official gsplat renderer active'. "
+            "On non-CUDA systems choose render_mode=source_static, gaussian_color, depth, or alpha."
+        )
 
     g = scene.gaussians
     points = g.mean_vectors.reshape(-1, 3).detach().float().to(device)

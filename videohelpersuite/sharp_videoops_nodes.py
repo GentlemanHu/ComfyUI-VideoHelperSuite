@@ -22,6 +22,10 @@ T_SHARP_SCENE = "VHS_SHARP_SCENE"
 T_SHARP_CAMERA = "VHS_SHARP_CAMERA"
 
 CAMERA_PRESETS = [
+    "official_rotate_forward",
+    "official_rotate",
+    "official_swipe",
+    "official_shake",
     "cinematic_orbit",
     "dolly_push",
     "dolly_pull",
@@ -38,6 +42,7 @@ PERFORMANCE_PRESETS = ["draft", "balanced", "quality", "custom"]
 RESOLUTION_MODES = ["auto_source", "custom", "720p", "1080p", "square_1024", "source"]
 SPLAT_QUALITIES = ["point", "fast", "balanced"]
 RENDER_BACKENDS = ["auto", "gpu", "cpu"]
+RENDER_MODES = ["photo_composite", "source_static", "gaussian_color", "depth", "alpha"]
 
 
 def _source_size_from_image(image) -> tuple[int, int]:
@@ -294,7 +299,7 @@ class VHSSharpCameraRig:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "preset": (CAMERA_PRESETS, {"default": "cinematic_orbit"}),
+                "preset": (CAMERA_PRESETS, {"default": "official_rotate_forward"}),
             },
             "optional": {
                 "amplitude": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01}),
@@ -366,7 +371,7 @@ class VHSSharpRenderVideo:
                 "resolution_mode": (RESOLUTION_MODES, {"default": "custom"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
-                "render_mode": (["photo_composite", "gaussian_color", "depth", "alpha"], {"default": "photo_composite"}),
+                "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
                 "source_photo_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
@@ -435,7 +440,7 @@ class VHSSharpImageToVideo:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "camera_preset": (CAMERA_PRESETS, {"default": "cinematic_orbit"}),
+                "camera_preset": (CAMERA_PRESETS, {"default": "official_rotate_forward"}),
             },
             "optional": {
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "auto"}),
@@ -463,7 +468,7 @@ class VHSSharpImageToVideo:
                 "resolution_mode": (RESOLUTION_MODES, {"default": "auto_source"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
-                "render_mode": (["photo_composite", "gaussian_color", "depth", "alpha"], {"default": "photo_composite"}),
+                "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
                 "source_photo_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
