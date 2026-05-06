@@ -269,6 +269,34 @@ def _find_depthflow_executable() -> str:
         f"  - Install depthflow globally so it appears on PATH\n"
     )
 
+
+def _patch_depthflow_runtime(executable: str) -> None:
+    """Patch known installed DepthFlow/ShaderFlow incompatibilities in old venvs."""
+    exe = Path(str(executable)).resolve()
+    roots = []
+    for parent in [exe.parent, *exe.parents]:
+        if parent.name in ("bin", "Scripts"):
+            roots.append(parent.parent)
+            break
+    roots.append(Path(__file__).resolve().parent.parent / ".venv_depthflow")
+    scene_files: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        scene_files.extend(root.glob("lib/python*/site-packages/depthflow/scene.py"))
+        scene_files.extend(root.glob("Lib/site-packages/depthflow/scene.py"))
+    for scene_file in dict.fromkeys(scene_files):
+        try:
+            text = scene_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        old = "        self.resolution = self.image.size"
+        if old not in text:
+            continue
+        new = "        width, height = self.image.size\n        self.resize(width=width, height=height)"
+        scene_file.write_text(text.replace(old, new), encoding="utf-8")
+        print(f"[DepthFlow] Patched runtime resize compatibility: {scene_file}")
+
 # Video cache directory
 VIDEO_CACHE_DIR = os.path.join(folder_paths.get_temp_directory(), "video_cache")
 os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
@@ -919,6 +947,7 @@ class DepthFlowGenerator:
 
         # Use the full path to the depthflow executable
         depthflow_exe = _find_depthflow_executable()
+        _patch_depthflow_runtime(depthflow_exe)
         print(f"[DepthFlow] Using executable: {depthflow_exe}")
         cli_motion, cli_caps = _resolve_depthflow_cli_motion(depthflow_exe, str(camera_movement))
         depth_override_path = ""
