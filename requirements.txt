@@ -3,6 +3,7 @@ imageio-ffmpeg
 pandas
 huggingface_hub
 plyfile
+gsplat==1.5.3; platform_system == "Linux"
 git+https://github.com/GentlemanHu/ShortGPT.git@stable
 git+https://github.com/jianfch/stable-ts.git
 git+https://github.com/rezoo/movis.git

@@ -35,6 +35,8 @@ _encode_cache: dict[str, Any] = {
     "monodepth_output": None,
     "image_resized": None,
 }
+_gsplat_warning_emitted = False
+_gsplat_info_emitted = False
 
 
 @dataclass
@@ -422,6 +424,225 @@ def splat_offsets(mode: str, device: torch.device) -> torch.Tensor:
     return torch.tensor(offsets, dtype=torch.float32, device=device)
 
 
+def _background_name(background: tuple[float, float, float]) -> str:
+    if sum(background) / 3.0 > 0.5:
+        return "white"
+    return "black"
+
+
+def _sharp_intrinsics(scene: SharpScene, width: int, height: int, device: torch.device) -> torch.Tensor:
+    src_w, src_h = scene.source_size
+    fx = float(scene.focal_px) * float(width) / max(float(src_w), 1.0)
+    fy = float(scene.focal_px) * float(height) / max(float(src_h), 1.0)
+    intrinsics = torch.eye(4, dtype=torch.float32, device=device)
+    intrinsics[0, 0] = fx
+    intrinsics[1, 1] = fy
+    intrinsics[0, 2] = float(width) * 0.5
+    intrinsics[1, 2] = float(height) * 0.5
+    return intrinsics
+
+
+def _depth_focus(scene: SharpScene, device: torch.device) -> float:
+    points = scene.gaussians.mean_vectors.reshape(-1, 3).detach().float()
+    z = points[:, 2]
+    z = z[z > 1e-4]
+    if z.numel() == 0:
+        return 2.0
+    return max(2.0, float(torch.quantile(z.cpu(), 0.1)))
+
+
+def _max_eye_offset(scene: SharpScene, width: int, height: int, amplitude: float, radius_scale: float) -> np.ndarray:
+    points = scene.gaussians.mean_vectors.reshape(-1, 3).detach().float()
+    z = points[:, 2]
+    z = z[z > 1e-4]
+    min_depth = float(torch.quantile(z.cpu(), 0.001)) if z.numel() else 2.0
+    diagonal = np.sqrt((float(width) / float(scene.focal_px)) ** 2 + (float(height) / float(scene.focal_px)) ** 2)
+    lateral = 0.08 * diagonal * min_depth * max(0.0, float(amplitude)) * max(0.1, float(radius_scale))
+    medial = 0.15 * min_depth * max(0.0, float(amplitude))
+    return np.array([lateral, lateral, medial], dtype=np.float32)
+
+
+def _camera_matrix(
+    position: torch.Tensor,
+    look_at_position: torch.Tensor,
+    world_up: torch.Tensor,
+    inverse: bool,
+) -> torch.Tensor:
+    camera_front = look_at_position - position
+    camera_front = camera_front / camera_front.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    camera_right = torch.cross(camera_front, world_up, dim=-1)
+    camera_right = camera_right / camera_right.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    camera_down = torch.cross(camera_front, camera_right, dim=-1)
+    rotation = torch.stack([camera_right, camera_down, camera_front], dim=-1)
+    matrix = torch.eye(4, dtype=torch.float32, device=position.device)
+    if inverse:
+        matrix[:3, :3] = rotation.T
+        matrix[:3, 3:4] = -rotation.T @ position[:, None]
+    else:
+        matrix[:3, :3] = rotation
+        matrix[:3, 3] = position
+    return matrix
+
+
+def _official_eye_position(scene: SharpScene, rig: dict[str, Any], t: float, width: int, height: int, device: torch.device) -> torch.Tensor:
+    preset = str(rig.get("preset", "cinematic_orbit"))
+    amp = float(rig.get("amplitude", 1.0))
+    radius_scale = float(rig.get("radius_scale", 1.0))
+    phase = 2.0 * np.pi * (float(t) + float(rig.get("phase", 0.0)))
+    offset_x, offset_y, offset_z = _max_eye_offset(scene, width, height, amp, radius_scale)
+    yaw_delta = np.deg2rad(float(rig.get("yaw_delta", 20.0)) * float(t))
+    pitch_delta = np.deg2rad(float(rig.get("pitch_delta", 0.0)) * float(t))
+    radius_delta = float(rig.get("radius_delta", 0.0)) * float(t)
+
+    if preset in {"cinematic_orbit", "hero_parallax"}:
+        eye = [offset_x * np.sin(phase), 0.0, offset_z * (1.0 - np.cos(phase)) * 0.5]
+    elif preset == "micro_float":
+        eye = [offset_x * 0.45 * np.sin(phase), offset_y * 0.35 * np.sin(phase * 0.7), offset_z * 0.25 * (1.0 - np.cos(phase))]
+    elif preset == "turntable":
+        eye = [offset_x * np.sin(phase), offset_y * np.cos(phase), 0.0]
+    elif preset == "truck_left":
+        eye = [offset_x * (2.0 * t - 1.0), 0.0, 0.0]
+    elif preset == "dolly_push":
+        eye = [0.0, 0.0, -offset_z * float(t)]
+    elif preset == "dolly_pull":
+        eye = [0.0, 0.0, offset_z * float(t)]
+    elif preset == "crane_up":
+        eye = [0.0, offset_y * (float(t) - 0.5), 0.0]
+    elif preset == "arc_reveal":
+        local_phase = np.deg2rad(-55.0 + 110.0 * float(t))
+        eye = [offset_x * np.sin(local_phase), 0.0, offset_z * (1.0 - np.cos(local_phase)) * 0.5]
+    elif preset == "custom":
+        eye = [
+            offset_x * np.sin(yaw_delta),
+            offset_y * np.sin(pitch_delta),
+            offset_z * radius_delta,
+        ]
+    else:
+        eye = [offset_x * np.sin(phase), 0.0, offset_z * (1.0 - np.cos(phase)) * 0.5]
+    return torch.tensor(eye, dtype=torch.float32, device=device)
+
+
+def _official_extrinsics(scene: SharpScene, rig: dict[str, Any], t: float, width: int, height: int, device: torch.device) -> torch.Tensor:
+    eye = _official_eye_position(scene, rig, t, width, height, device)
+    mode = "ahead" if str(rig.get("lookat_mode", "point")) == "ahead" else "point"
+    origin = eye if mode == "ahead" else torch.zeros(3, dtype=torch.float32, device=device)
+    focus = _depth_focus(scene, device)
+    look_at = origin + torch.tensor([0.0, 0.0, focus], dtype=torch.float32, device=device)
+    world_up = torch.tensor([0.0, -1.0, 0.0], dtype=torch.float32, device=device)
+    return _camera_matrix(eye, look_at, world_up, inverse=True)
+
+
+def _render_frame_gsplat(
+    scene: SharpScene,
+    rig: dict[str, Any],
+    t: float,
+    width: int,
+    height: int,
+    background: tuple[float, float, float],
+    render_backend: str,
+    render_mode: str,
+) -> torch.Tensor | None:
+    global _gsplat_info_emitted, _gsplat_warning_emitted
+    device = render_device(render_backend)
+    if device.type != "cuda":
+        if not _gsplat_warning_emitted:
+            log_info(f"Official gsplat renderer skipped: requires CUDA, current device={device}")
+            _gsplat_warning_emitted = True
+        return None
+    try:
+        import gsplat
+        from .apple_sharp import color_space as cs_utils
+    except Exception as exc:
+        if not _gsplat_warning_emitted:
+            log_info(f"Official gsplat renderer unavailable: {exc}. Falling back to torch preview renderer.")
+            _gsplat_warning_emitted = True
+        return None
+
+    if not _gsplat_info_emitted:
+        log_info(
+            f"Official gsplat renderer active: device={device}, size={width}x{height}, "
+            f"mode={render_mode}, camera_preset={rig.get('preset', 'custom')}"
+        )
+        _gsplat_info_emitted = True
+
+    g = scene.gaussians.to(device)
+    intrinsics = _sharp_intrinsics(scene, width, height, device)
+    extrinsics = _official_extrinsics(scene, rig, t, width, height, device)
+    colors, alphas, _ = gsplat.rendering.rasterization(
+        means=g.mean_vectors[0],
+        quats=g.quaternions[0],
+        scales=g.singular_values[0],
+        opacities=g.opacities[0],
+        colors=g.colors[0],
+        viewmats=extrinsics[None],
+        Ks=intrinsics[None, :3, :3],
+        width=int(width),
+        height=int(height),
+        render_mode="RGB+D",
+        rasterize_mode="classic",
+        absgrad=False,
+        packed=False,
+        eps2d=0.3,
+    )
+    rendered_color = colors[..., 0:3].permute(0, 3, 1, 2)
+    rendered_depth_unnormalized = colors[..., 3:4].permute(0, 3, 1, 2)
+    rendered_alpha = alphas.permute(0, 3, 1, 2)
+    mode = str(render_mode or "photo_composite").lower()
+    if mode == "alpha":
+        out = rendered_alpha.expand(-1, 3, -1, -1)
+    elif mode == "depth":
+        depth = rendered_depth_unnormalized / torch.clip(rendered_alpha, min=1e-8)
+        valid = rendered_alpha > 1e-4
+        if valid.any():
+            d = depth[valid]
+            dmin, dmax = torch.quantile(d, 0.02), torch.quantile(d, 0.98)
+            depth = ((depth - dmin) / (dmax - dmin).clamp(min=1e-6)).clamp(0, 1)
+        out = depth.expand(-1, 3, -1, -1)
+    else:
+        bg_name = _background_name(background)
+        if bg_name == "white":
+            rendered_color = rendered_color + (1.0 - rendered_alpha)
+        rendered_color = cs_utils.linearRGB2sRGB(rendered_color.clamp(0, 1))
+        out = rendered_color
+    return out[0].permute(1, 2, 0).clamp(0, 1).detach().cpu()
+
+
+def _render_photo_warp_fallback(
+    scene: SharpScene,
+    rig: dict[str, Any],
+    t: float,
+    width: int,
+    height: int,
+    device: torch.device,
+    exposure: float,
+    gamma: float,
+) -> torch.Tensor:
+    src = scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0)
+    resized = F.interpolate(src, size=(int(height), int(width)), mode="bilinear", align_corners=False)
+    yy, xx = torch.meshgrid(
+        torch.linspace(-1.0, 1.0, int(height), dtype=torch.float32, device=device),
+        torch.linspace(-1.0, 1.0, int(width), dtype=torch.float32, device=device),
+        indexing="ij",
+    )
+    eye = _official_eye_position(scene, rig, t, width, height, device)
+    focus = max(_depth_focus(scene, device), 1e-3)
+    parallax_x = (eye[0] / focus).clamp(-0.2, 0.2)
+    parallax_y = (eye[1] / focus).clamp(-0.2, 0.2)
+    radial = (xx.square() + yy.square()).sqrt().clamp(0, 1)
+    depth_proxy = 0.25 + 0.75 * radial
+    grid = torch.stack(
+        [
+            xx + parallax_x * depth_proxy * 1.6,
+            yy - parallax_y * depth_proxy * 1.6,
+        ],
+        dim=-1,
+    ).unsqueeze(0)
+    warped = F.grid_sample(resized, grid, mode="bilinear", padding_mode="border", align_corners=True)
+    canvas = warped[0].permute(1, 2, 0).clamp(0, 1)
+    canvas = (canvas * float(exposure)).clamp(0, 1)
+    return canvas.detach().cpu()
+
+
 def render_frame(
     scene: SharpScene,
     rig: dict[str, Any],
@@ -439,7 +660,15 @@ def render_frame(
     render_mode: str = "photo_composite",
     source_photo_strength: float = 0.85,
 ) -> torch.Tensor:
+    gsplat_frame = _render_frame_gsplat(scene, rig, t, width, height, background, render_backend, render_mode)
+    if gsplat_frame is not None:
+        canvas = (gsplat_frame * float(exposure)).clamp(0, 1)
+        return canvas.clamp(0, 1)
+
     device = render_device(render_backend)
+    if str(render_mode or "photo_composite").lower() == "photo_composite":
+        return _render_photo_warp_fallback(scene, rig, t, width, height, device, exposure, gamma)
+
     g = scene.gaussians
     points = g.mean_vectors.reshape(-1, 3).detach().float().to(device)
     colors = g.colors.reshape(-1, 3).detach().float().to(device).clamp(0, 1)
