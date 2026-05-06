@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -15,6 +16,13 @@ from huggingface_hub import hf_hub_download
 
 import folder_paths
 
+
+logger = logging.getLogger("VHS.SHARP")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 SHARP_REPO_ID = "apple/Sharp"
 SHARP_FILENAME = "sharp_2572gikvuh.pt"
@@ -34,6 +42,7 @@ class SharpScene:
     gaussians: Any
     focal_px: float
     source_size: tuple[int, int]
+    source_image: torch.Tensor
     bounds_min: torch.Tensor
     bounds_max: torch.Tensor
     center: torch.Tensor
@@ -49,6 +58,10 @@ def models_dir() -> str:
     except Exception:
         pass
     return root
+
+
+def log_info(message: str) -> None:
+    logger.info(message)
 
 
 def model_config(precision: str = "auto") -> dict[str, str]:
@@ -71,6 +84,7 @@ def model_config(precision: str = "auto") -> dict[str, str]:
         filename=SHARP_FILENAME,
         local_dir=models_dir(),
     )
+    log_info(f"Model config: repo={SHARP_REPO_ID}, file={SHARP_FILENAME}, path={path}, dtype={dtype_str}")
     return {"model_path": path, "precision": precision, "dtype": dtype_str}
 
 
@@ -84,14 +98,17 @@ def load_model(precision: str = "auto"):
     from . import apple_sharp
     cfg = model_config(precision)
     if _model_patcher is not None and _model_config == cfg:
+        log_info("Model cache hit: reusing loaded RGBGaussianPredictor")
         return _model_patcher
 
+    t0 = time.perf_counter()
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[cfg["dtype"]]
     load_device = comfy.model_management.get_torch_device()
     offload_device = comfy.model_management.unet_offload_device()
     manual_cast_dtype = comfy.model_management.unet_manual_cast(dtype, load_device)
     operations = comfy.ops.pick_operations(dtype, manual_cast_dtype)
     state_dict = comfy.utils.load_torch_file(cfg["model_path"])
+    log_info(f"Loading RGBGaussianPredictor: precision={precision}, dtype={cfg['dtype']}, device={load_device}")
     with torch.device("meta"):
         predictor = apple_sharp.create_predictor(
             apple_sharp.PredictorParams(),
@@ -117,6 +134,7 @@ def load_model(precision: str = "auto"):
         offload_device=offload_device,
     )
     _model_config = cfg
+    log_info(f"Model initialized in {time.perf_counter() - t0:.2f}s")
     return _model_patcher
 
 
@@ -164,11 +182,15 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
     comfy.model_management.load_models_gpu([patcher], memory_required=patcher.memory_required(input_shape))
 
     height, width = image_np.shape[:2]
+    log_info(f"SHARP inference input: source={width}x{height}, internal={INTERNAL_SIZE}x{INTERNAL_SIZE}, focal_px={focal_px:.2f}")
     image_hash = _hash_image(image_np)
     if _encode_cache["image_hash"] == image_hash:
+        log_info("Encode cache hit: reusing monodepth features")
         monodepth_output = _monodepth_to(_encode_cache["monodepth_output"], device)
         image_resized = _encode_cache["image_resized"].to(device)
     else:
+        t_encode = time.perf_counter()
+        log_info("Encode start: resizing image and running SHARP encoder")
         image_pt = torch.from_numpy(image_np.copy()).float().to(device).permute(2, 0, 1) / 255.0
         image_resized = F.interpolate(
             image_pt[None],
@@ -177,6 +199,7 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
             align_corners=True,
         )
         monodepth_output, _ = predictor.encode(image_resized)
+        log_info(f"Encode complete in {time.perf_counter() - t_encode:.2f}s")
         _encode_cache = {
             "image_hash": image_hash,
             "monodepth_output": _monodepth_to(monodepth_output, "cpu"),
@@ -185,7 +208,10 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
         comfy.model_management.soft_empty_cache()
 
     disparity_factor = torch.tensor([float(focal_px) / float(width)], device=device)
+    t_decode = time.perf_counter()
+    log_info("Decode start: generating 3D Gaussians")
     gaussians_ndc = predictor.decode(monodepth_output, image_resized, disparity_factor)
+    log_info(f"Decode complete in {time.perf_counter() - t_decode:.2f}s")
     intrinsics = torch.tensor(
         [
             [focal_px, 0, width / 2, 0],
@@ -199,17 +225,20 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
     intrinsics[0] *= INTERNAL_SIZE / width
     intrinsics[1] *= INTERNAL_SIZE / height
     extrinsics = torch.eye(4, dtype=torch.float32, device=device)
-    return gauss_mod.unproject_gaussians(
+    gaussians = gauss_mod.unproject_gaussians(
         gaussians_ndc,
         extrinsics,
         intrinsics,
         (INTERNAL_SIZE, INTERNAL_SIZE),
     )
+    log_info(f"Unproject complete: gaussians={gaussians.mean_vectors.reshape(-1, 3).shape[0]}")
+    return gaussians
 
 
 def filter_gaussians(gaussians: Any, max_gaussians: int, min_opacity: float) -> Any:
     if max_gaussians <= 0 and min_opacity <= 0:
         return gaussians
+    before = int(gaussians.opacities.reshape(-1).shape[0])
     opacity = gaussians.opacities.reshape(-1)
     mask = opacity >= float(min_opacity)
     if max_gaussians > 0 and int(mask.sum()) > max_gaussians:
@@ -219,13 +248,15 @@ def filter_gaussians(gaussians: Any, max_gaussians: int, min_opacity: float) -> 
         idx = idx_all[keep]
     else:
         idx = torch.where(mask)[0]
-    return type(gaussians)(
+    filtered = type(gaussians)(
         mean_vectors=gaussians.mean_vectors.reshape(-1, 3)[idx].unsqueeze(0),
         singular_values=gaussians.singular_values.reshape(-1, 3)[idx].unsqueeze(0),
         quaternions=gaussians.quaternions.reshape(-1, 4)[idx].unsqueeze(0),
         colors=gaussians.colors.reshape(-1, 3)[idx].unsqueeze(0),
         opacities=gaussians.opacities.reshape(-1)[idx].unsqueeze(0),
     )
+    log_info(f"Gaussian filter: before={before}, after={int(idx.shape[0])}, max={max_gaussians}, min_opacity={min_opacity}")
+    return filtered
 
 
 def make_scene(
@@ -242,6 +273,11 @@ def make_scene(
     image_np = image_to_numpy_rgb(image)
     height, width = image_np.shape[:2]
     focal_px = focal_mm_to_px(width, height, focal_length_mm)
+    log_info(
+        f"Build scene start: source={width}x{height}, precision={precision}, "
+        f"focal_mm={focal_length_mm}, max_gaussians={max_gaussians}, min_opacity={min_opacity}"
+    )
+    t0 = time.perf_counter()
     gaussians = predict_gaussians(image_np, focal_px, precision=precision)
     gaussians = filter_gaussians(gaussians, int(max_gaussians), float(min_opacity))
     pts = gaussians.mean_vectors.reshape(-1, 3).detach().float().cpu()
@@ -256,10 +292,13 @@ def make_scene(
         out_dir.mkdir(parents=True, exist_ok=True)
         ply_path = str(out_dir / f"{output_prefix}_{int(time.time() * 1000)}.ply")
         gauss_mod.save_ply(gaussians, focal_px, (height, width), Path(ply_path))
+        log_info(f"PLY saved: {ply_path}")
+    log_info(f"Build scene complete in {time.perf_counter() - t0:.2f}s, radius={radius:.4f}")
     return SharpScene(
         gaussians=gaussians,
         focal_px=float(focal_px),
         source_size=(width, height),
+        source_image=torch.from_numpy(image_np).float() / 255.0,
         bounds_min=bounds_min,
         bounds_max=bounds_max,
         center=center,
@@ -338,6 +377,51 @@ def camera_pose(scene: SharpScene, rig: dict[str, Any], t: float) -> tuple[torch
     return rot, pos, float(zoom)
 
 
+def render_device(name: str = "auto") -> torch.device:
+    mode = str(name or "auto").lower()
+    if mode == "cpu":
+        return torch.device("cpu")
+    if mode in {"gpu", "cuda"}:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    try:
+        import comfy.model_management
+        device = comfy.model_management.get_torch_device()
+        if isinstance(device, torch.device):
+            return device
+        return torch.device(str(device))
+    except Exception:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+
+def splat_offsets(mode: str, device: torch.device) -> torch.Tensor:
+    quality = str(mode or "balanced").lower()
+    if quality == "point":
+        offsets = [(0, 0)]
+    elif quality == "fast":
+        offsets = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]
+    else:
+        offsets = [
+            (0, 0),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (1, 1),
+            (-1, 1),
+            (1, -1),
+        ]
+    return torch.tensor(offsets, dtype=torch.float32, device=device)
+
+
 def render_frame(
     scene: SharpScene,
     rig: dict[str, Any],
@@ -350,19 +434,25 @@ def render_frame(
     exposure: float,
     gamma: float,
     background: tuple[float, float, float],
+    render_backend: str = "auto",
+    splat_quality: str = "balanced",
+    render_mode: str = "photo_composite",
+    source_photo_strength: float = 0.85,
 ) -> torch.Tensor:
+    device = render_device(render_backend)
     g = scene.gaussians
-    points = g.mean_vectors.reshape(-1, 3).detach().float().cpu()
-    colors = g.colors.reshape(-1, 3).detach().float().cpu().clamp(0, 1)
-    opacity = g.opacities.reshape(-1).detach().float().cpu().clamp(0, 1) * float(opacity_gain)
-    scale = g.singular_values.reshape(-1, 3).detach().float().cpu().mean(dim=1)
+    points = g.mean_vectors.reshape(-1, 3).detach().float().to(device)
+    colors = g.colors.reshape(-1, 3).detach().float().to(device).clamp(0, 1)
+    opacity = g.opacities.reshape(-1).detach().float().to(device).clamp(0, 1) * float(opacity_gain)
+    scale = g.singular_values.reshape(-1, 3).detach().float().to(device).mean(dim=1)
     rot, pos, zoom = camera_pose(scene, rig, t)
+    rot = rot.to(device)
+    pos = pos.to(device)
     cam = (points - pos) @ rot.T
     z = cam[:, 2]
     valid = z > 1e-4
     if not valid.any():
-        bg = torch.tensor(background, dtype=torch.float32)
-        return bg.reshape(1, 1, 3).repeat(height, width, 1)
+        return render_background(scene, width, height, background, device, render_mode, source_photo_strength).cpu()
     cam = cam[valid]
     z = z[valid]
     colors = colors[valid]
@@ -376,29 +466,78 @@ def render_frame(
     yi = y.round().long()
     in_view = (xi >= 0) & (xi < width) & (yi >= 0) & (yi < height)
     if not in_view.any():
-        bg = torch.tensor(background, dtype=torch.float32)
-        return bg.reshape(1, 1, 3).repeat(height, width, 1)
+        return render_background(scene, width, height, background, device, render_mode, source_photo_strength).cpu()
     xi, yi, z = xi[in_view], yi[in_view], z[in_view]
-    colors, opacity, radius = colors[in_view], opacity[in_view], radius[in_view]
-    order = torch.argsort(z, descending=True)
-    canvas = torch.tensor(background, dtype=torch.float32).reshape(1, 1, 3).repeat(height, width, 1)
-    alpha_canvas = torch.zeros(height, width, dtype=torch.float32)
-    offsets = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]
-    for idx in order.tolist():
-        r = int(max(1, min(3, round(float(radius[idx])))))
-        for ox, oy in offsets[: 1 + min(8, (r - 1) * 4)]:
-            px = int(xi[idx]) + ox
-            py = int(yi[idx]) + oy
-            if 0 <= px < width and 0 <= py < height:
-                dist = (ox * ox + oy * oy) ** 0.5 / max(float(r), 1.0)
-                a = float(opacity[idx]) * float(np.exp(-dist * dist * 1.8))
-                a = max(0.0, min(1.0, a))
-                cur_a = alpha_canvas[py, px]
-                out_a = a + cur_a * (1.0 - a)
-                if out_a > 1e-6:
-                    canvas[py, px] = (colors[idx] * a + canvas[py, px] * cur_a * (1.0 - a)) / out_a
-                    alpha_canvas[py, px] = out_a
+    colors, opacity, radius = colors[in_view], opacity[in_view], radius[in_view].clamp(0.75, 6.0)
+
+    offsets = splat_offsets(splat_quality, device)
+    ox = offsets[:, 0].reshape(1, -1)
+    oy = offsets[:, 1].reshape(1, -1)
+    px = xi.reshape(-1, 1) + ox.long()
+    py = yi.reshape(-1, 1) + oy.long()
+    inside = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+
+    dist = torch.sqrt(ox.square() + oy.square()) / radius.reshape(-1, 1).clamp(min=1.0)
+    weight = opacity.reshape(-1, 1) * torch.exp(-dist.square() * 1.8)
+    near_boost = (1.0 / z.reshape(-1, 1).clamp(min=0.05)).clamp(max=4.0)
+    weight = (weight * near_boost).clamp(0.0, 1.0)
+
+    flat_idx = (py * int(width) + px).reshape(-1)
+    flat_inside = inside.reshape(-1)
+    flat_idx = flat_idx[flat_inside].long()
+    flat_weight = weight.reshape(-1)[flat_inside]
+    flat_colors = colors[:, None, :].expand(-1, offsets.shape[0], -1).reshape(-1, 3)[flat_inside]
+
+    num_pixels = int(width) * int(height)
+    alpha_accum = torch.zeros(num_pixels, dtype=torch.float32, device=device)
+    color_accum = torch.zeros(num_pixels, 3, dtype=torch.float32, device=device)
+    alpha_accum.scatter_add_(0, flat_idx, flat_weight)
+    color_accum.scatter_add_(0, flat_idx[:, None].expand(-1, 3), flat_colors * flat_weight[:, None])
+
+    bg_image = render_background(scene, width, height, background, device, render_mode, source_photo_strength).reshape(-1, 3)
+    alpha = alpha_accum.clamp(0.0, 1.0).reshape(-1, 1)
+    splat_color = color_accum / alpha_accum.clamp(min=1e-6).reshape(-1, 1)
+    mode = str(render_mode or "photo_composite").lower()
+    if mode == "alpha":
+        canvas = alpha.expand(-1, 3)
+    elif mode == "depth":
+        depth = torch.zeros(int(width) * int(height), dtype=torch.float32, device=device)
+        inv_z = (1.0 / z.clamp(min=0.05)).reshape(-1, 1).expand(-1, offsets.shape[0]).reshape(-1)[flat_inside]
+        depth.scatter_add_(0, flat_idx, inv_z * flat_weight)
+        depth = depth / alpha_accum.clamp(min=1e-6)
+        valid_depth = alpha_accum > 1e-6
+        if valid_depth.any():
+            d = depth[valid_depth]
+            dmin, dmax = torch.quantile(d, 0.02), torch.quantile(d, 0.98)
+            depth = ((depth - dmin) / (dmax - dmin).clamp(min=1e-6)).clamp(0, 1)
+        canvas = depth.reshape(-1, 1).expand(-1, 3)
+    elif mode == "gaussian_color":
+        flat_bg = torch.tensor(background, dtype=torch.float32, device=device).reshape(1, 3)
+        canvas = splat_color * alpha + flat_bg * (1.0 - alpha)
+    else:
+        strength = max(0.0, min(1.0, float(source_photo_strength)))
+        composite_alpha = (alpha * (1.0 - strength * 0.35)).clamp(0.0, 1.0)
+        canvas = splat_color * composite_alpha + bg_image * (1.0 - composite_alpha)
+    canvas = canvas.reshape(int(height), int(width), 3)
     canvas = (canvas * float(exposure)).clamp(0, 1)
     if gamma > 0:
         canvas = canvas.pow(1.0 / float(gamma))
-    return canvas.clamp(0, 1)
+    return canvas.clamp(0, 1).cpu()
+
+
+def render_background(
+    scene: SharpScene,
+    width: int,
+    height: int,
+    background: tuple[float, float, float],
+    device: torch.device,
+    render_mode: str,
+    source_photo_strength: float,
+) -> torch.Tensor:
+    mode = str(render_mode or "photo_composite").lower()
+    if mode == "photo_composite" and source_photo_strength > 0:
+        src = scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0)
+        resized = F.interpolate(src, size=(int(height), int(width)), mode="bilinear", align_corners=False)
+        return resized[0].permute(1, 2, 0).clamp(0, 1)
+    bg = torch.tensor(background, dtype=torch.float32, device=device)
+    return bg.reshape(1, 1, 3).repeat(int(height), int(width), 1)
