@@ -26,7 +26,13 @@ CAMERA_PRESETS = [
     "official_rotate",
     "official_swipe",
     "official_shake",
+    "viewer_auto",
     "cinematic_orbit",
+    "portrait_orbit",
+    "portrait_push",
+    "window_parallax",
+    "slow_gallery",
+    "breathing_closeup",
     "dolly_push",
     "dolly_pull",
     "crane_up",
@@ -38,7 +44,7 @@ CAMERA_PRESETS = [
     "custom",
 ]
 
-PERFORMANCE_PRESETS = ["draft", "balanced", "quality", "custom"]
+PERFORMANCE_PRESETS = ["viewer", "draft", "balanced", "quality", "custom"]
 RESOLUTION_MODES = ["auto_source", "custom", "720p", "1080p", "square_1024", "source"]
 SPLAT_QUALITIES = ["point", "fast", "balanced"]
 RENDER_BACKENDS = ["auto", "gpu", "cpu"]
@@ -76,7 +82,7 @@ def _resolve_size(mode: str, width: int, height: int, source_size: tuple[int, in
     if key == "square_1024":
         return 1024, 1024
     if key == "auto_source":
-        max_side = 1280
+        max_side = 1024
         if src_w >= src_h:
             return _even(max_side), _even(round(max_side / aspect))
         return _even(round(max_side * aspect)), _even(max_side)
@@ -85,10 +91,12 @@ def _resolve_size(mode: str, width: int, height: int, source_size: tuple[int, in
 
 def _resolve_budget(mode: str, max_gaussians: int) -> int:
     key = str(mode or "balanced")
+    if key == "viewer":
+        return min(int(max_gaussians), 80000) if max_gaussians > 0 else 80000
     if key == "draft":
-        return min(int(max_gaussians), 50000) if max_gaussians > 0 else 50000
+        return min(int(max_gaussians), 40000) if max_gaussians > 0 else 40000
     if key == "balanced":
-        return min(int(max_gaussians), 120000) if max_gaussians > 0 else 120000
+        return min(int(max_gaussians), 100000) if max_gaussians > 0 else 100000
     if key == "quality":
         return min(int(max_gaussians), 250000) if max_gaussians > 0 else 250000
     return int(max_gaussians)
@@ -189,9 +197,12 @@ def _render_frames(
 ) -> list[torch.Tensor]:
     total = max(1, int(round(float(duration) * int(fps))))
     device = sharp_engine.render_device(render_backend)
+    gaussian_count = int(scene.gaussians.mean_vectors.reshape(-1, 3).shape[0])
+    megapixels = (int(width) * int(height)) / 1_000_000.0
     sharp_engine.log_info(
         f"Render frames start: size={width}x{height}, fps={fps}, duration={duration}, "
-        f"frames={total}, backend={render_backend}, device={device}, splat_quality={splat_quality}, "
+        f"frames={total}, gaussians={gaussian_count}, megapixels={megapixels:.2f}, "
+        f"backend={render_backend}, device={device}, splat_quality={splat_quality}, "
         f"mode={render_mode}"
     )
     t0 = time.perf_counter()
@@ -200,6 +211,8 @@ def _render_frames(
     for i in range(total):
         frame_t0 = time.perf_counter()
         tau = i / max(total - 1, 1)
+        if i == 0:
+            sharp_engine.log_info("Render first frame start: gsplat may compile CUDA kernels on first use")
         frame = sharp_engine.render_frame(
             scene,
             camera,
@@ -258,7 +271,7 @@ class VHSSharpBuildScene:
                 "min_opacity": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "save_ply": ("BOOLEAN", {"default": True}),
                 "output_prefix": ("STRING", {"default": "sharp_scene"}),
-                "performance_preset": (PERFORMANCE_PRESETS, {"default": "balanced"}),
+                "performance_preset": (PERFORMANCE_PRESETS, {"default": "viewer"}),
             },
         }
 
@@ -276,7 +289,7 @@ class VHSSharpBuildScene:
         min_opacity=0.02,
         save_ply=True,
         output_prefix="sharp_scene",
-        performance_preset="balanced",
+        performance_preset="viewer",
     ):
         budget = _resolve_budget(performance_preset, int(max_gaussians))
         sharp_engine.log_info(
@@ -464,7 +477,7 @@ class VHSSharpImageToVideo:
                 "save_ply": ("BOOLEAN", {"default": True}),
                 "output_prefix": ("STRING", {"default": "sharp_image_to_video"}),
                 "output_frames": ("BOOLEAN", {"default": True}),
-                "performance_preset": (PERFORMANCE_PRESETS, {"default": "balanced"}),
+                "performance_preset": (PERFORMANCE_PRESETS, {"default": "viewer"}),
                 "resolution_mode": (RESOLUTION_MODES, {"default": "auto_source"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),

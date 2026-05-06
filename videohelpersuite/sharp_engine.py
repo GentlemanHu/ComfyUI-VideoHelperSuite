@@ -529,7 +529,7 @@ def _official_eye_position(scene: SharpScene, rig: dict[str, Any], t: float, wid
     pitch_delta = np.deg2rad(float(rig.get("pitch_delta", 0.0)) * float(t))
     radius_delta = float(rig.get("radius_delta", 0.0)) * float(t)
 
-    if preset in {"official_rotate_forward", "cinematic_orbit", "hero_parallax"}:
+    if preset in {"official_rotate_forward", "viewer_auto"}:
         eye = [offset_x * np.sin(phase), 0.0, offset_z * (1.0 - np.cos(phase)) * 0.5]
     elif preset == "official_rotate":
         eye = [offset_x * np.sin(phase), offset_y * np.cos(phase), 0.0]
@@ -540,6 +540,18 @@ def _official_eye_position(scene: SharpScene, rig: dict[str, Any], t: float, wid
             eye = [offset_x * np.sin(4.0 * np.pi * t), 0.0, 0.0]
         else:
             eye = [0.0, offset_y * np.sin(4.0 * np.pi * (t - 0.5)), 0.0]
+    elif preset == "cinematic_orbit":
+        eye = [offset_x * 0.85 * np.sin(phase), offset_y * 0.12 * np.cos(phase), offset_z * 0.45 * (1.0 - np.cos(phase))]
+    elif preset == "portrait_orbit":
+        eye = [offset_x * 0.55 * np.sin(phase), offset_y * 0.08 * np.sin(phase * 0.5), offset_z * 0.24 * (1.0 - np.cos(phase))]
+    elif preset == "portrait_push":
+        eye = [offset_x * 0.18 * np.sin(phase), 0.0, -offset_z * 0.55 * t]
+    elif preset == "window_parallax":
+        eye = [offset_x * 0.9 * (2.0 * t - 1.0), offset_y * 0.08 * np.sin(phase), offset_z * 0.12 * np.sin(phase)]
+    elif preset == "slow_gallery":
+        eye = [offset_x * 0.38 * np.sin(phase * 0.5), offset_y * 0.08 * np.cos(phase * 0.5), offset_z * 0.18 * (1.0 - np.cos(phase * 0.5))]
+    elif preset == "breathing_closeup":
+        eye = [offset_x * 0.16 * np.sin(phase), offset_y * 0.06 * np.sin(phase * 0.7), offset_z * 0.28 * (1.0 - np.cos(phase))]
     elif preset == "micro_float":
         eye = [offset_x * 0.45 * np.sin(phase), offset_y * 0.35 * np.sin(phase * 0.7), offset_z * 0.25 * (1.0 - np.cos(phase))]
     elif preset == "turntable":
@@ -769,7 +781,6 @@ def render_frame(
     if gamma > 0:
         canvas = canvas.pow(1.0 / float(gamma))
     return canvas.clamp(0, 1).cpu()
-
 
 def render_background(
     scene: SharpScene,
