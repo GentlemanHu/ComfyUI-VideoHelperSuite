@@ -102,6 +102,58 @@ def _resolve_budget(mode: str, max_gaussians: int) -> int:
     return int(max_gaussians)
 
 
+DEFAULT_CAMERA_PATH = """[
+  {"t": 0.0, "x": -0.45, "y": 0.00, "z": 0.00},
+  {"t": 0.35, "x": 0.18, "y": -0.06, "z": 0.20},
+  {"t": 0.70, "x": 0.45, "y": 0.04, "z": 0.10},
+  {"t": 1.0, "x": -0.45, "y": 0.00, "z": 0.00}
+]"""
+
+
+def _parse_camera_path(path_text: str) -> list[dict[str, float]]:
+    text = str(path_text or "").strip()
+    if not text:
+        text = DEFAULT_CAMERA_PATH
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.replace(";", ",").split(",")]
+            if len(parts) < 4:
+                continue
+            data.append({"t": parts[0], "x": parts[1], "y": parts[2], "z": parts[3]})
+    if isinstance(data, dict):
+        data = data.get("keyframes", [])
+    if not isinstance(data, list):
+        raise ValueError("SHARP camera path must be a JSON list or CSV lines: t,x,y,z")
+    keyframes: list[dict[str, float]] = []
+    for item in data:
+        if isinstance(item, dict):
+            source = item
+        elif isinstance(item, (list, tuple)) and len(item) >= 4:
+            source = {"t": item[0], "x": item[1], "y": item[2], "z": item[3]}
+        else:
+            continue
+        keyframes.append(
+            {
+                "t": max(0.0, min(1.0, float(source["t"]))),
+                "x": float(source["x"]),
+                "y": float(source["y"]),
+                "z": float(source["z"]),
+            }
+        )
+    if len(keyframes) < 2:
+        raise ValueError("SHARP camera path needs at least two keyframes")
+    keyframes.sort(key=lambda item: item["t"])
+    keyframes[0]["t"] = 0.0
+    keyframes[-1]["t"] = 1.0
+    return keyframes
+
+
 def _bg(color: str) -> tuple[float, float, float]:
     c = str(color).strip().lower()
     table = {
@@ -360,6 +412,51 @@ class VHSSharpCameraRig:
         return (camera, json.dumps(camera, ensure_ascii=False, indent=2))
 
 
+class VHSSharpCameraPath:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "path_json": ("STRING", {"default": DEFAULT_CAMERA_PATH, "multiline": True}),
+                "path_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01}),
+                "interpolation": (["smooth", "linear"], {"default": "smooth"}),
+                "loop": ("BOOLEAN", {"default": False}),
+                "lookat_mode": (["point", "ahead"], {"default": "point"}),
+                "amplitude": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01}),
+                "radius_scale": ("FLOAT", {"default": 1.0, "min": 0.2, "max": 5.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = (T_SHARP_CAMERA, "STRING")
+    RETURN_NAMES = ("camera", "info")
+    FUNCTION = "build"
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/SHARP VideoOps"
+
+    def build(
+        self,
+        path_json=DEFAULT_CAMERA_PATH,
+        path_scale=1.0,
+        interpolation="smooth",
+        loop=False,
+        lookat_mode="point",
+        amplitude=1.0,
+        radius_scale=1.0,
+    ):
+        keyframes = _parse_camera_path(path_json)
+        camera = {
+            "preset": "keyframes",
+            "keyframes": keyframes,
+            "path_scale": float(path_scale),
+            "interpolation": str(interpolation),
+            "loop": bool(loop),
+            "lookat_mode": str(lookat_mode),
+            "amplitude": float(amplitude),
+            "radius_scale": float(radius_scale),
+        }
+        return (camera, json.dumps(camera, ensure_ascii=False, indent=2))
+
+
 class VHSSharpRenderVideo:
     @classmethod
     def INPUT_TYPES(cls):
@@ -558,6 +655,7 @@ class VHSSharpImageToVideo:
 NODE_CLASS_MAPPINGS = {
     "VHS_SHARP_BuildScene": VHSSharpBuildScene,
     "VHS_SHARP_CameraRig": VHSSharpCameraRig,
+    "VHS_SHARP_CameraPath": VHSSharpCameraPath,
     "VHS_SHARP_RenderVideo": VHSSharpRenderVideo,
     "VHS_SHARP_ImageToVideo": VHSSharpImageToVideo,
 }
@@ -565,6 +663,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_SHARP_BuildScene": "SHARP Build Gaussian Scene 🍎🎥🅥🅗🅢",
     "VHS_SHARP_CameraRig": "SHARP Camera Rig 🍎🎬🅥🅗🅢",
+    "VHS_SHARP_CameraPath": "SHARP Camera Path Recorder 🍎🎛️🅥🅗🅢",
     "VHS_SHARP_RenderVideo": "SHARP Render Video 🍎🎥🅥🅗🅢",
     "VHS_SHARP_ImageToVideo": "SHARP Image To Video 🍎🎥🅥🅗🅢",
 }

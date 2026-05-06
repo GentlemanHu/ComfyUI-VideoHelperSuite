@@ -19,6 +19,8 @@ from huggingface_hub import hf_hub_download
 
 import folder_paths
 
+from .sharp_camera_path import sample_keyframe_eye
+
 
 logger = logging.getLogger("VHS.SHARP")
 if not logger.handlers:
@@ -426,21 +428,15 @@ def splat_offsets(mode: str, device: torch.device) -> torch.Tensor:
             (1, -1),
         ]
     return torch.tensor(offsets, dtype=torch.float32, device=device)
-
-
 def _background_name(background: tuple[float, float, float]) -> str:
     if sum(background) / 3.0 > 0.5:
         return "white"
     return "black"
-
-
 def _static_source_frame(scene: SharpScene, width: int, height: int, device: torch.device, exposure: float) -> torch.Tensor:
     src = scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0)
     resized = F.interpolate(src, size=(int(height), int(width)), mode="bilinear", align_corners=False)
     canvas = resized[0].permute(1, 2, 0).clamp(0, 1)
     return (canvas * float(exposure)).clamp(0, 1).detach().cpu()
-
-
 def _import_gsplat_with_optional_install():
     global _gsplat_install_attempted
     try:
@@ -463,8 +459,6 @@ def _import_gsplat_with_optional_install():
         import gsplat
         log_info("Official gsplat renderer installed; restart ComfyUI if import/cache issues appear.")
         return gsplat
-
-
 def _sharp_intrinsics(scene: SharpScene, width: int, height: int, device: torch.device) -> torch.Tensor:
     src_w, src_h = scene.source_size
     fx = float(scene.focal_px) * float(width) / max(float(src_w), 1.0)
@@ -475,8 +469,6 @@ def _sharp_intrinsics(scene: SharpScene, width: int, height: int, device: torch.
     intrinsics[0, 2] = float(width) * 0.5
     intrinsics[1, 2] = float(height) * 0.5
     return intrinsics
-
-
 def _depth_focus(scene: SharpScene, device: torch.device) -> float:
     points = scene.gaussians.mean_vectors.reshape(-1, 3).detach().float()
     z = points[:, 2]
@@ -529,7 +521,10 @@ def _official_eye_position(scene: SharpScene, rig: dict[str, Any], t: float, wid
     pitch_delta = np.deg2rad(float(rig.get("pitch_delta", 0.0)) * float(t))
     radius_delta = float(rig.get("radius_delta", 0.0)) * float(t)
 
-    if preset in {"official_rotate_forward", "viewer_auto"}:
+    keyframe_eye = sample_keyframe_eye(rig, float(t), np.array([offset_x, offset_y, offset_z], dtype=np.float32))
+    if keyframe_eye is not None:
+        eye = keyframe_eye
+    elif preset in {"official_rotate_forward", "viewer_auto"}:
         eye = [offset_x * np.sin(phase), 0.0, offset_z * (1.0 - np.cos(phase)) * 0.5]
     elif preset == "official_rotate":
         eye = [offset_x * np.sin(phase), offset_y * np.cos(phase), 0.0]
