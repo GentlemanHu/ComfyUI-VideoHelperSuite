@@ -740,7 +740,10 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     # We will manually construct state
     try:
         from depthflow.state import DepthState
-        import depthflow.animation as dfa
+        try:
+            import depthflow.vhs_animation as dfa
+        except Exception:
+            import depthflow.animation as dfa
     except ImportError as exc:
         raise RuntimeError(f"DepthFlow OpenGL state import failed: {exc}") from exc
 
