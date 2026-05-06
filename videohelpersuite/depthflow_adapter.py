@@ -211,6 +211,9 @@ def estimate_depth(
         elif key == "zoedepth":
             from depthflow.estimators.zoedepth import ZoeDepth
             depth = ZoeDepth(post=bool(postprocess)).estimate(img_np)
+        elif key == "marigold":
+            from depthflow.estimators.marigold import Marigold
+            depth = Marigold(post=bool(postprocess)).estimate(img_np)
         else:
             raise ValueError(f"Unknown DepthFlow estimator: {estimator}")
         return prepare_depth_map(depth, img_np, normalize_mode="auto")

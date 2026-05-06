@@ -921,20 +921,26 @@ class DepthFlowGenerator:
         depthflow_exe = _find_depthflow_executable()
         print(f"[DepthFlow] Using executable: {depthflow_exe}")
         cli_motion, cli_caps = _resolve_depthflow_cli_motion(depthflow_exe, str(camera_movement))
+        depth_override_path = ""
         if depth_estimator not in cli_caps["estimators"]:
-            fallback_estimator = "da2" if "da2" in cli_caps["estimators"] else next(iter(sorted(cli_caps["estimators"])))
-            print(
-                f"[DepthFlow] OpenGL CLI does not provide estimator '{depth_estimator}', "
-                f"using '{fallback_estimator}' instead"
-            )
-            depth_estimator = fallback_estimator
+            print(f"[DepthFlow] OpenGL CLI does not provide estimator '{depth_estimator}', estimating depth in VHS")
+            from .depthflow_adapter import estimate_depth
+            depth_np = estimate_depth(np.asarray(processed_img.convert("RGB")), depth_estimator)
+            depth_u16 = (np.clip(depth_np, 0.0, 1.0) * 65535.0).astype(np.uint16)
+            depth_filename = f"depthflow_depth_{_datetime}.png"
+            depth_override_path = os.path.join(folder_paths.get_temp_directory(), depth_filename)
+            Image.fromarray(depth_u16, mode="I;16").save(depth_override_path)
+            print(f"[DepthFlow] Saved estimated depth override: {depth_override_path}")
         
         # Build command with proper structure
         command = [
             depthflow_exe,
             "input", "-i", input_path,
-            depth_estimator,  # Depth estimator
         ]
+        if depth_override_path:
+            command.extend(["-d", depth_override_path])
+        else:
+            command.append(depth_estimator)
         
         # Add camera movement with parameters (if not static)
         if cli_motion != "static":
@@ -1185,6 +1191,9 @@ class DepthFlowGenerator:
                 if os.path.exists(input_path):
                     os.remove(input_path)
                     print(f"[DepthFlow] Cleaned up temporary input file")
+                if depth_override_path and os.path.exists(depth_override_path):
+                    os.remove(depth_override_path)
+                    print(f"[DepthFlow] Cleaned up temporary depth file")
             except:
                 pass
         
