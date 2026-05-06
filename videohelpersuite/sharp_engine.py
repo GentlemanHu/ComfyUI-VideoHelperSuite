@@ -592,7 +592,11 @@ def _render_frame_gsplat(
     height: int,
     background: tuple[float, float, float],
     render_backend: str,
+    splat_size: float,
+    opacity_gain: float,
+    splat_quality: str,
     render_mode: str,
+    source_photo_strength: float,
 ) -> torch.Tensor | None:
     global _gsplat_info_emitted, _gsplat_warning_emitted
     device = render_device(render_backend)
@@ -613,29 +617,44 @@ def _render_frame_gsplat(
     if not _gsplat_info_emitted:
         log_info(
             f"Official gsplat renderer active: device={device}, size={width}x{height}, "
-            f"mode={render_mode}, camera_preset={rig.get('preset', 'custom')}"
+            f"mode={render_mode}, quality={splat_quality}, camera_preset={rig.get('preset', 'custom')}"
         )
         _gsplat_info_emitted = True
 
     g = scene.gaussians.to(device)
     intrinsics = _sharp_intrinsics(scene, width, height, device)
     extrinsics = _official_extrinsics(scene, rig, t, width, height, device)
-    colors, alphas, _ = gsplat.rendering.rasterization(
+    quality = str(splat_quality or "balanced").lower()
+    eps2d = {"point": 0.05, "fast": 0.35, "balanced": 0.8}.get(quality, 0.8)
+    rasterize_mode = "antialiased" if quality == "balanced" else "classic"
+    scales = g.singular_values[0] * max(0.05, float(splat_size))
+    opacities = (g.opacities[0] * max(0.0, float(opacity_gain))).clamp(0, 1)
+    raster_kwargs = dict(
         means=g.mean_vectors[0],
         quats=g.quaternions[0],
-        scales=g.singular_values[0],
-        opacities=g.opacities[0],
+        scales=scales,
+        opacities=opacities,
         colors=g.colors[0],
         viewmats=extrinsics[None],
         Ks=intrinsics[None, :3, :3],
         width=int(width),
         height=int(height),
         render_mode="RGB+D",
-        rasterize_mode="classic",
+        rasterize_mode=rasterize_mode,
         absgrad=False,
         packed=False,
-        eps2d=0.3,
+        eps2d=eps2d,
     )
+    try:
+        colors, alphas, _ = gsplat.rendering.rasterization(**raster_kwargs)
+    except Exception as exc:
+        if rasterize_mode != "classic":
+            log_info(f"gsplat antialiased mode unavailable ({exc}); retrying classic rasterization")
+            raster_kwargs["rasterize_mode"] = "classic"
+            raster_kwargs["eps2d"] = max(0.35, eps2d)
+            colors, alphas, _ = gsplat.rendering.rasterization(**raster_kwargs)
+        else:
+            raise
     rendered_color = colors[..., 0:3].permute(0, 3, 1, 2)
     rendered_depth_unnormalized = colors[..., 3:4].permute(0, 3, 1, 2)
     rendered_alpha = alphas.permute(0, 3, 1, 2)
@@ -655,7 +674,13 @@ def _render_frame_gsplat(
         if bg_name == "white":
             rendered_color = rendered_color + (1.0 - rendered_alpha)
         rendered_color = cs_utils.linearRGB2sRGB(rendered_color.clamp(0, 1))
-        out = rendered_color
+        if mode == "photo_composite" and source_photo_strength > 0:
+            src = F.interpolate(scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0), size=(int(height), int(width)), mode="bilinear", align_corners=False)
+            strength = max(0.0, min(1.0, float(source_photo_strength)))
+            missing = (1.0 - rendered_alpha.clamp(0, 1)).pow(0.65) * strength
+            out = rendered_color * (1.0 - missing) + src * missing
+        else:
+            out = rendered_color
     return out[0].permute(1, 2, 0).clamp(0, 1).detach().cpu()
 
 
@@ -674,14 +699,27 @@ def render_frame(
     render_backend: str = "auto",
     splat_quality: str = "balanced",
     render_mode: str = "photo_composite",
-    source_photo_strength: float = 0.85,
+    source_photo_strength: float = 1.0,
 ) -> torch.Tensor:
     device = render_device(render_backend)
     mode = str(render_mode or "photo_composite").lower()
     if mode == "source_static":
         return _static_source_frame(scene, width, height, device, exposure)
 
-    gsplat_frame = _render_frame_gsplat(scene, rig, t, width, height, background, render_backend, render_mode)
+    gsplat_frame = _render_frame_gsplat(
+        scene,
+        rig,
+        t,
+        width,
+        height,
+        background,
+        render_backend,
+        splat_size,
+        opacity_gain,
+        splat_quality,
+        render_mode,
+        source_photo_strength,
+    )
     if gsplat_frame is not None:
         canvas = (gsplat_frame * float(exposure)).clamp(0, 1)
         return canvas.clamp(0, 1)

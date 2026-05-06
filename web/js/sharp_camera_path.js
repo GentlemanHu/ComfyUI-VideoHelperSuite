@@ -88,6 +88,13 @@ function setWidgetValue(node, name, value) {
     widget.callback?.(value);
 }
 
+function hideBackingWidget(widget) {
+    widget.hidden = true;
+    widget.type = "hidden";
+    widget.computeSize = () => [0, -4];
+    widget.draw = () => {};
+}
+
 function drawEditor(canvas, points, activeIndex, isRecording, mode, target) {
     const ctx = canvas.getContext("2d");
     const width = canvas.width;
@@ -170,6 +177,7 @@ function installCameraPathEditor(node) {
     if (!pathWidget || findWidget(node, "sharp_camera_path_editor")) {
         return;
     }
+    hideBackingWidget(pathWidget);
     const root = document.createElement("div");
     root.style.display = "flex";
     root.style.flexDirection = "column";
@@ -179,12 +187,14 @@ function installCameraPathEditor(node) {
     root.style.border = "1px solid #334155";
     root.style.borderRadius = "6px";
     root.style.boxSizing = "border-box";
+    root.style.height = "304px";
+    root.style.overflow = "hidden";
 
     const canvas = document.createElement("canvas");
     canvas.width = 320;
     canvas.height = 180;
     canvas.style.width = "100%";
-    canvas.style.height = "180px";
+    canvas.style.height = "176px";
     canvas.style.cursor = "crosshair";
     canvas.style.borderRadius = "4px";
     root.appendChild(canvas);
@@ -248,11 +258,13 @@ function installCameraPathEditor(node) {
     const button = (label, fn) => {
         const el = document.createElement("button");
         el.textContent = label;
-        el.style.padding = "4px";
+        el.style.padding = "5px 4px";
         el.style.borderRadius = "4px";
         el.style.border = "1px solid #475569";
         el.style.background = "#1e293b";
         el.style.color = "#e2e8f0";
+        el.style.minWidth = "0";
+        el.style.lineHeight = "16px";
         el.onclick = fn;
         controls.appendChild(el);
         return el;
@@ -359,8 +371,8 @@ function installCameraPathEditor(node) {
         serialize: false,
         hideOnZoom: false,
     });
-    editorWidget.computeSize = (width) => [width, 260];
-    node.setSize([Math.max(node.size[0], 360), node.computeSize()[1] + 260]);
+    editorWidget.computeSize = (width) => [width, 312];
+    node.setSize([Math.max(node.size[0], 380), node.computeSize()[1]]);
     refresh();
 }
 

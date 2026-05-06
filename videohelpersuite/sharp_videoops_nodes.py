@@ -45,7 +45,7 @@ CAMERA_PRESETS = [
     "custom",
 ]
 
-PERFORMANCE_PRESETS = ["viewer", "draft", "balanced", "quality", "custom"]
+PERFORMANCE_PRESETS = ["full", "viewer", "draft", "balanced", "quality", "custom"]
 RESOLUTION_MODES = ["auto_source", "custom", "720p", "1080p", "square_1024", "source"]
 SPLAT_QUALITIES = ["point", "fast", "balanced"]
 RENDER_BACKENDS = ["auto", "gpu", "cpu"]
@@ -92,15 +92,25 @@ def _resolve_size(mode: str, width: int, height: int, source_size: tuple[int, in
 
 def _resolve_budget(mode: str, max_gaussians: int) -> int:
     key = str(mode or "balanced")
+    if key == "full":
+        return 0
     if key == "viewer":
-        return min(int(max_gaussians), 80000) if max_gaussians > 0 else 80000
+        return 500000
     if key == "draft":
-        return min(int(max_gaussians), 40000) if max_gaussians > 0 else 40000
+        return 150000
     if key == "balanced":
-        return min(int(max_gaussians), 100000) if max_gaussians > 0 else 100000
+        return 350000
     if key == "quality":
-        return min(int(max_gaussians), 250000) if max_gaussians > 0 else 250000
+        return 800000
     return int(max_gaussians)
+
+
+def _resolve_min_opacity(mode: str, min_opacity: float) -> float:
+    key = str(mode or "balanced")
+    value = float(min_opacity)
+    if key != "custom" and value <= 0.02:
+        return 0.0
+    return value
 
 
 DEFAULT_CAMERA_PATH = """[
@@ -320,11 +330,11 @@ class VHSSharpBuildScene:
             "optional": {
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "auto"}),
                 "focal_length_mm": ("FLOAT", {"default": 30.0, "min": 0.0, "max": 500.0, "step": 0.1}),
-                "max_gaussians": ("INT", {"default": 120000, "min": 0, "max": 1000000, "step": 1000}),
-                "min_opacity": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_gaussians": ("INT", {"default": 0, "min": 0, "max": 2000000, "step": 1000}),
+                "min_opacity": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "save_ply": ("BOOLEAN", {"default": True}),
                 "output_prefix": ("STRING", {"default": "sharp_scene"}),
-                "performance_preset": (PERFORMANCE_PRESETS, {"default": "viewer"}),
+                "performance_preset": (PERFORMANCE_PRESETS, {"default": "full"}),
             },
         }
 
@@ -338,22 +348,24 @@ class VHSSharpBuildScene:
         image,
         precision="auto",
         focal_length_mm=30.0,
-        max_gaussians=120000,
-        min_opacity=0.02,
+        max_gaussians=0,
+        min_opacity=0.0,
         save_ply=True,
         output_prefix="sharp_scene",
-        performance_preset="viewer",
+        performance_preset="full",
     ):
         budget = _resolve_budget(performance_preset, int(max_gaussians))
+        min_opacity_value = _resolve_min_opacity(performance_preset, float(min_opacity))
         sharp_engine.log_info(
-            f"Node BuildScene start: preset={performance_preset}, gaussian_budget={budget}, save_ply={save_ply}"
+            f"Node BuildScene start: preset={performance_preset}, gaussian_budget={budget}, "
+            f"min_opacity={min_opacity_value}, save_ply={save_ply}"
         )
         scene = sharp_engine.make_scene(
             image,
             precision=precision,
             focal_length_mm=float(focal_length_mm),
             max_gaussians=budget,
-            min_opacity=float(min_opacity),
+            min_opacity=min_opacity_value,
             save_ply=bool(save_ply),
             output_prefix=str(output_prefix),
         )
@@ -495,7 +507,7 @@ class VHSSharpRenderVideo:
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
                 "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
-                "source_photo_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_photo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
 
@@ -525,7 +537,7 @@ class VHSSharpRenderVideo:
         render_backend="auto",
         splat_quality="balanced",
         render_mode="photo_composite",
-        source_photo_strength=0.85,
+        source_photo_strength=1.0,
     ):
         out_w, out_h = _resolve_size(resolution_mode, int(width), int(height), _source_size_from_scene(scene))
         sharp_engine.log_info(
@@ -568,8 +580,8 @@ class VHSSharpImageToVideo:
             "optional": {
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "auto"}),
                 "focal_length_mm": ("FLOAT", {"default": 30.0, "min": 0.0, "max": 500.0, "step": 0.1}),
-                "max_gaussians": ("INT", {"default": 120000, "min": 0, "max": 1000000, "step": 1000}),
-                "min_opacity": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_gaussians": ("INT", {"default": 0, "min": 0, "max": 2000000, "step": 1000}),
+                "min_opacity": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "width": ("INT", {"default": 1280, "min": 256, "max": 4096, "step": 8}),
                 "height": ("INT", {"default": 720, "min": 256, "max": 4096, "step": 8}),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 60, "step": 1}),
@@ -587,12 +599,12 @@ class VHSSharpImageToVideo:
                 "save_ply": ("BOOLEAN", {"default": True}),
                 "output_prefix": ("STRING", {"default": "sharp_image_to_video"}),
                 "output_frames": ("BOOLEAN", {"default": True}),
-                "performance_preset": (PERFORMANCE_PRESETS, {"default": "viewer"}),
+                "performance_preset": (PERFORMANCE_PRESETS, {"default": "full"}),
                 "resolution_mode": (RESOLUTION_MODES, {"default": "auto_source"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
                 "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
-                "source_photo_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_photo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
 
@@ -603,7 +615,9 @@ class VHSSharpImageToVideo:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/SHARP VideoOps"
 
     def run(self, image, camera_preset, **kwargs):
-        budget = _resolve_budget(kwargs.get("performance_preset", "balanced"), int(kwargs.get("max_gaussians", 120000)))
+        performance_preset = kwargs.get("performance_preset", "full")
+        budget = _resolve_budget(performance_preset, int(kwargs.get("max_gaussians", 0)))
+        min_opacity_value = _resolve_min_opacity(performance_preset, float(kwargs.get("min_opacity", 0.0)))
         source_size = _source_size_from_image(image)
         out_w, out_h = _resolve_size(
             kwargs.get("resolution_mode", "auto_source"),
@@ -614,7 +628,7 @@ class VHSSharpImageToVideo:
         sharp_engine.log_info(
             f"Node ImageToVideo start: camera={camera_preset}, source={source_size[0]}x{source_size[1]}, "
             f"output={out_w}x{out_h}, resolution_mode={kwargs.get('resolution_mode', 'auto_source')}, "
-            f"preset={kwargs.get('performance_preset', 'balanced')}, gaussian_budget={budget}, "
+            f"preset={performance_preset}, gaussian_budget={budget}, min_opacity={min_opacity_value}, "
             f"render_mode={kwargs.get('render_mode', 'photo_composite')}, codec={kwargs.get('video_codec', 'h264')}"
         )
         scene = sharp_engine.make_scene(
@@ -622,7 +636,7 @@ class VHSSharpImageToVideo:
             precision=kwargs.get("precision", "auto"),
             focal_length_mm=float(kwargs.get("focal_length_mm", 30.0)),
             max_gaussians=budget,
-            min_opacity=float(kwargs.get("min_opacity", 0.02)),
+            min_opacity=min_opacity_value,
             save_ply=bool(kwargs.get("save_ply", True)),
             output_prefix=str(kwargs.get("output_prefix", "sharp_image_to_video")),
         )
@@ -649,7 +663,7 @@ class VHSSharpImageToVideo:
             render_backend=str(kwargs.get("render_backend", "auto")),
             splat_quality=str(kwargs.get("splat_quality", "balanced")),
             render_mode=str(kwargs.get("render_mode", "photo_composite")),
-            source_photo_strength=float(kwargs.get("source_photo_strength", 0.85)),
+            source_photo_strength=float(kwargs.get("source_photo_strength", 1.0)),
         )
         video_path, filename = _encode_video(
             frames,
