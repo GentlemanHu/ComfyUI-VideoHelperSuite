@@ -375,6 +375,76 @@ class VideoDownloadManager:
 # Global download manager
 video_manager = VideoDownloadManager() 
 
+
+_DEPTHFLOW_CLI_CACHE: dict[str, dict] = {}
+
+
+def _depthflow_cli_text(executable: str, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            [executable, *args, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return (result.stdout or "") + "\n" + (result.stderr or "")
+    except Exception as exc:
+        print(f"[DepthFlow] CLI help probe skipped for {args or ('root',)}: {exc}")
+        return ""
+
+
+def _depthflow_cli_capabilities(executable: str) -> dict:
+    cached = _DEPTHFLOW_CLI_CACHE.get(executable)
+    if cached is not None:
+        return cached
+    root_help = _depthflow_cli_text(executable)
+    supported = {
+        name for name in ("vertical", "horizontal", "circle", "zoom", "dolly", "orbital")
+        if name in root_help
+    }
+    if not supported:
+        supported = {"vertical", "horizontal", "circle"}
+    movement_help = {name: _depthflow_cli_text(executable, name) for name in supported}
+    estimators = {name for name in ("da1", "da2", "da3", "depthpro", "zoedepth", "marigold") if name in root_help}
+    if not estimators:
+        estimators = {"da1", "da2", "da3"}
+    data = {"movements": supported, "movement_help": movement_help, "estimators": estimators}
+    _DEPTHFLOW_CLI_CACHE[executable] = data
+    return data
+
+
+def _resolve_depthflow_cli_motion(executable: str, requested: str) -> tuple[str, dict]:
+    caps = _depthflow_cli_capabilities(executable)
+    supported = caps["movements"]
+    if requested == "static" or requested in supported:
+        return requested, caps
+    raise RuntimeError(
+        f"DepthFlow OpenGL CLI does not provide '{requested}'. "
+        f"Supported commands: {', '.join(sorted(supported))}. "
+        "Update the DepthFlow fork/venv with VHS animation presets, "
+        "or use render_backend='cuda' for the CUDA renderer path."
+    )
+
+
+def _append_if_supported(command: list[str], help_text: str, long_name: str, short_name: str, value: str) -> bool:
+    if long_name in help_text:
+        command.extend([long_name, value])
+        return True
+    if short_name and short_name in help_text:
+        command.extend([short_name, value])
+        return True
+    return False
+
+
+def _append_flag_if_supported(command: list[str], help_text: str, flag: str) -> bool:
+    if flag in help_text:
+        command.append(flag)
+        return True
+    return False
+
+
 class DepthFlowGenerator:
     """
     Professional DepthFlow video generator with cinematic camera movements
@@ -515,8 +585,8 @@ class DepthFlowGenerator:
                     "tooltip": "CUDA路径：深度图高斯平滑sigma。0=不平滑(与GLSL一致,推荐)。0.3-0.6=轻度平滑。>1=重度平滑。"
                 }),
                 "render_backend": (["auto", "cuda", "opengl"], {
-                    "default": "auto",
-                    "tooltip": "渲染后端 | auto: CUDA优先,失败回退OpenGL(推荐) | cuda: 仅CUDA | opengl: 仅subprocess OpenGL路径"
+                    "default": "opengl",
+                    "tooltip": "渲染后端 | opengl: subprocess OpenGL路径(默认) | auto: CUDA优先,失败回退OpenGL | cuda: 仅CUDA"
                 }),
             },
         }
@@ -696,7 +766,7 @@ class DepthFlowGenerator:
         steady_depth=0.3,
         isometric=0.6,
         output_format="mp4",
-        video_codec="h264-nvenc",
+        video_codec="h264",
         depth_estimator="da2",
         output_frames=True,
         max_frames_export=0,
@@ -704,7 +774,7 @@ class DepthFlowGenerator:
         cuda_inpaint_threshold=3.0,
         cuda_enable_aa=True,
         cuda_depth_smooth=0.0,
-        render_backend="auto",
+        render_backend="opengl",
     ):
         """
         Professional DepthFlow video generation with cinematic camera movements
@@ -850,6 +920,14 @@ class DepthFlowGenerator:
         # Use the full path to the depthflow executable
         depthflow_exe = _find_depthflow_executable()
         print(f"[DepthFlow] Using executable: {depthflow_exe}")
+        cli_motion, cli_caps = _resolve_depthflow_cli_motion(depthflow_exe, str(camera_movement))
+        if depth_estimator not in cli_caps["estimators"]:
+            fallback_estimator = "da2" if "da2" in cli_caps["estimators"] else next(iter(sorted(cli_caps["estimators"])))
+            print(
+                f"[DepthFlow] OpenGL CLI does not provide estimator '{depth_estimator}', "
+                f"using '{fallback_estimator}' instead"
+            )
+            depth_estimator = fallback_estimator
         
         # Build command with proper structure
         command = [
@@ -859,60 +937,63 @@ class DepthFlowGenerator:
         ]
         
         # Add camera movement with parameters (if not static)
-        if camera_movement != "static":
-            command.append(camera_movement)
-            command.extend(["--intensity", str(movement_intensity)])
+        if cli_motion != "static":
+            command.append(cli_motion)
+            movement_help = cli_caps["movement_help"].get(cli_motion, "")
+            if not _append_if_supported(
+                command,
+                movement_help,
+                "--intensity",
+                "-i",
+                str(movement_intensity),
+            ):
+                print(f"[DepthFlow] CLI movement '{cli_motion}' has no intensity option; skipping intensity")
             
             # Common parameters for most movements
             # vertical, horizontal, zoom, dolly support these
-            if camera_movement in ["vertical", "horizontal", "zoom", "dolly"]:
+            if cli_motion in ["vertical", "horizontal", "zoom", "dolly"]:
                 # Boolean flags - add appropriate flag for each state
                 if movement_reverse:
-                    command.append("-r")
-                else:
-                    command.append("-fw")
+                    if not _append_flag_if_supported(command, movement_help, "--reverse"):
+                        _append_flag_if_supported(command, movement_help, "-r")
                 
-                if movement_smooth:
-                    command.append("-s")
-                else:
-                    command.append("-ns")
+                if not movement_smooth:
+                    if not _append_flag_if_supported(command, movement_help, "--no-smooth"):
+                        _append_flag_if_supported(command, movement_help, "-ns")
                 
-                if movement_loop:
-                    command.append("-l")
-                else:
-                    command.append("-nl")
+                if not movement_loop:
+                    if not _append_flag_if_supported(command, movement_help, "--no-loop"):
+                        _append_flag_if_supported(command, movement_help, "-nl")
                 
-                command.extend(["-p", str(movement_phase)])
+                _append_if_supported(command, movement_help, "--phase", "-p", str(movement_phase))
             
             # circle supports reverse and phase
-            elif camera_movement == "circle":
+            elif cli_motion == "circle":
                 if movement_reverse:
-                    command.append("-r")
-                else:
-                    command.append("-fw")
-                command.extend(["-p", str(movement_phase), str(movement_phase), str(movement_phase)])
+                    if not _append_flag_if_supported(command, movement_help, "--reverse"):
+                        _append_flag_if_supported(command, movement_help, "-r")
+                _append_if_supported(command, movement_help, "--phase", "-p", str(movement_phase))
             
             # orbital supports reverse only
-            elif camera_movement == "orbital":
+            elif cli_motion == "orbital":
                 if movement_reverse:
-                    command.append("-r")
-                else:
-                    command.append("-fw")
+                    if not _append_flag_if_supported(command, movement_help, "--reverse"):
+                        _append_flag_if_supported(command, movement_help, "-r")
             
             # Add steady_depth for movements that support it
             # vertical, horizontal, circle support -S
-            if camera_movement in ["vertical", "horizontal", "circle"]:
-                command.extend(["-S", str(steady_depth)])
+            if cli_motion in ["vertical", "horizontal", "circle"]:
+                _append_if_supported(command, movement_help, "--steady", "-S", str(steady_depth))
             
             # Add isometric for movements that support it
             # vertical, horizontal, zoom, circle support -I
-            if camera_movement in ["vertical", "horizontal", "zoom", "circle"]:
-                command.extend(["-I", str(isometric)])
+            if cli_motion in ["vertical", "horizontal", "zoom", "circle"]:
+                _append_if_supported(command, movement_help, "--isometric", "-I", str(isometric))
             
             # Add depth for movements that support it
             # dolly, orbital support -d
-            if camera_movement in ["dolly", "orbital"]:
-                command.extend(["-d", str(steady_depth)])  # Use steady_depth as focal depth
+            if cli_motion in ["dolly", "orbital"]:
+                _append_if_supported(command, movement_help, "--depth", "-d", str(steady_depth))
         
         # Add video codec (only if not gif)
         if output_format != "gif":
@@ -982,6 +1063,8 @@ class DepthFlowGenerator:
         print(f"[DepthFlow] Codec: {video_codec}")
         print(f"[DepthFlow] Format: {output_format}")
         print(f"[DepthFlow] Depth Estimator: {depth_estimator}")
+        if cli_motion != camera_movement:
+            print(f"[DepthFlow] OpenGL CLI Movement: {cli_motion} (requested: {camera_movement})")
         print(f"[DepthFlow] GPU OpenGL: {'YES' if gpu_opengl else 'NO (llvmpipe CPU)'}")
         print(f"[DepthFlow] OpenGL Platform: {env.get('PYOPENGL_PLATFORM', 'default')}")
         print(f"[DepthFlow] EGL Vendor ICD: {env.get('__EGL_VENDOR_LIBRARY_FILENAMES', 'auto')}")
@@ -1096,7 +1179,7 @@ class DepthFlowGenerator:
             raise RuntimeError(
                 f"DepthFlow failed to generate video.\n"
                 f"Return code: {e.returncode}\n"
-                f"Try: Use 'h264' codec instead of 'h264-nvenc' for large resolutions"
+                f"Command: {' '.join(command)}"
             )
         finally:
             # Clean up temporary input file
