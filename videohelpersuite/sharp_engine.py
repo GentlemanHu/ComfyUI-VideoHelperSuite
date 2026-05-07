@@ -162,6 +162,8 @@ def _tensor_tree_bytes(value: Any) -> int:
         return value.numel() * value.element_size()
     if isinstance(value, dict):
         return sum(_tensor_tree_bytes(v) for v in value.values())
+    if hasattr(value, "_asdict"):
+        return sum(_tensor_tree_bytes(v) for v in value._asdict().values())
     if isinstance(value, (list, tuple)):
         return sum(_tensor_tree_bytes(v) for v in value)
     if hasattr(value, "__dict__"):
@@ -170,7 +172,17 @@ def _tensor_tree_bytes(value: Any) -> int:
 
 
 def _gaussians_device(gaussians: Any) -> torch.device | None:
-    for value in vars(gaussians).values():
+    if hasattr(gaussians, "_asdict"):
+        values = gaussians._asdict().values()
+    elif hasattr(gaussians, "__dict__"):
+        values = vars(gaussians).values()
+    else:
+        values = (
+            getattr(gaussians, name)
+            for name in ("mean_vectors", "singular_values", "quaternions", "colors", "opacities")
+            if hasattr(gaussians, name)
+        )
+    for value in values:
         if isinstance(value, torch.Tensor):
             return value.device
     return None
