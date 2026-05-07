@@ -141,6 +141,83 @@ def _should_keep_gaussians_on_gpu() -> bool:
     return _sharp_memory_policy() == "aggressive"
 
 
+def _render_residency_policy() -> str:
+    raw = os.environ.get("VHS_SHARP_RENDER_RESIDENCY", "auto")
+    policy = str(raw).strip().lower().replace("-", "_")
+    aliases = {
+        "fast": "gpu",
+        "max": "gpu",
+        "maximum": "gpu",
+        "performance": "gpu",
+        "vram": "gpu",
+        "safe": "cpu",
+        "lowram": "cpu",
+        "low_ram": "cpu",
+    }
+    return aliases.get(policy, policy if policy in {"auto", "gpu", "cpu"} else "auto")
+
+
+def _tensor_tree_bytes(value: Any) -> int:
+    if isinstance(value, torch.Tensor):
+        return value.numel() * value.element_size()
+    if isinstance(value, dict):
+        return sum(_tensor_tree_bytes(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_tensor_tree_bytes(v) for v in value)
+    if hasattr(value, "__dict__"):
+        return sum(_tensor_tree_bytes(v) for v in vars(value).values())
+    return 0
+
+
+def _gaussians_device(gaussians: Any) -> torch.device | None:
+    for value in vars(gaussians).values():
+        if isinstance(value, torch.Tensor):
+            return value.device
+    return None
+
+
+def _move_scene_gaussians(scene: SharpScene, device: Any, reason: str) -> None:
+    target = torch.device(device)
+    current = _gaussians_device(scene.gaussians)
+    if current is not None and current == target:
+        return
+    t0 = time.perf_counter()
+    scene.gaussians = scene.gaussians.to(target)
+    log_info(f"Gaussian scene moved to {target} for {reason} in {time.perf_counter() - t0:.2f}s")
+
+
+def prepare_scene_for_render(scene: SharpScene, render_backend: str = "auto") -> None:
+    device = render_device(render_backend)
+    policy = _render_residency_policy()
+    if policy == "cpu" or device.type != "cuda":
+        if policy == "cpu":
+            _move_scene_gaussians(scene, "cpu", "render residency policy")
+        return
+    estimated = _tensor_tree_bytes(scene.gaussians)
+    free_vram = None
+    try:
+        free_vram, _ = torch.cuda.mem_get_info(device)
+    except Exception:
+        pass
+    if policy == "auto" and free_vram is not None:
+        required = max(1 * 1024**3, estimated * 4)
+        if free_vram < required:
+            log_info(
+                "Gaussian scene stays on CPU for render: "
+                f"policy=auto, estimated_scene={estimated / 1024**2:.1f}MiB, "
+                f"free_vram={free_vram / 1024**3:.2f}GiB, required={required / 1024**3:.2f}GiB"
+            )
+            return
+    _move_scene_gaussians(scene, device, f"render residency policy={policy}")
+
+
+def finish_scene_render(scene: SharpScene) -> None:
+    if _should_keep_gaussians_on_gpu():
+        log_info("Gaussian scene remains on GPU after render: VHS_SHARP_KEEP_SCENE_GPU is on")
+        return
+    _move_scene_gaussians(scene, "cpu", "post-render cleanup")
+
+
 def _should_keep_predictor_loaded() -> bool:
     forced = _env_flag("VHS_SHARP_KEEP_MODEL")
     if forced is not None:

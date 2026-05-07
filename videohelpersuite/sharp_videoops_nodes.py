@@ -290,35 +290,39 @@ def _render_frames(
     t0 = time.perf_counter()
     pbar = ProgressBar(total)
     frames: list[torch.Tensor] = []
-    for i in range(total):
-        frame_t0 = time.perf_counter()
-        tau = i / max(total - 1, 1)
-        if i == 0:
-            sharp_engine.log_info("Render first frame start: gsplat may compile CUDA kernels on first use")
-        frame = sharp_engine.render_frame(
-            scene,
-            camera,
-            tau,
-            int(width),
-            int(height),
-            splat_size=float(splat_size),
-            opacity_gain=float(opacity_gain),
-            exposure=float(exposure),
-            gamma=float(gamma),
-            background=_bg(background),
-            render_backend=render_backend,
-            splat_quality=splat_quality,
-            render_mode=render_mode,
-            source_photo_strength=float(source_photo_strength),
-            fill_alpha_holes=bool(fill_alpha_holes),
-        )
-        frames.append(frame)
-        pbar.update_absolute(i + 1, total)
-        if i == 0 or (i + 1) % max(1, total // 8) == 0 or i == total - 1:
-            sharp_engine.log_info(
-                f"Render progress: {i + 1}/{total} frames, "
-                f"last_frame={time.perf_counter() - frame_t0:.3f}s"
+    sharp_engine.prepare_scene_for_render(scene, render_backend)
+    try:
+        for i in range(total):
+            frame_t0 = time.perf_counter()
+            tau = i / max(total - 1, 1)
+            if i == 0:
+                sharp_engine.log_info("Render first frame start: gsplat may compile CUDA kernels on first use")
+            frame = sharp_engine.render_frame(
+                scene,
+                camera,
+                tau,
+                int(width),
+                int(height),
+                splat_size=float(splat_size),
+                opacity_gain=float(opacity_gain),
+                exposure=float(exposure),
+                gamma=float(gamma),
+                background=_bg(background),
+                render_backend=render_backend,
+                splat_quality=splat_quality,
+                render_mode=render_mode,
+                source_photo_strength=float(source_photo_strength),
+                fill_alpha_holes=bool(fill_alpha_holes),
             )
+            frames.append(frame)
+            pbar.update_absolute(i + 1, total)
+            if i == 0 or (i + 1) % max(1, total // 8) == 0 or i == total - 1:
+                sharp_engine.log_info(
+                    f"Render progress: {i + 1}/{total} frames, "
+                    f"last_frame={time.perf_counter() - frame_t0:.3f}s"
+                )
+    finally:
+        sharp_engine.finish_scene_render(scene)
     sharp_engine.log_info(f"Render frames complete in {time.perf_counter() - t0:.2f}s")
     return frames
 
@@ -359,6 +363,7 @@ def _render_video_streaming(
     t0 = time.perf_counter()
     pbar = ProgressBar(total)
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    sharp_engine.prepare_scene_for_render(scene, render_backend)
     try:
         for i in range(total):
             frame_t0 = time.perf_counter()
@@ -399,6 +404,7 @@ def _render_video_streaming(
     finally:
         if proc.stdin and not proc.stdin.closed:
             proc.stdin.close()
+        sharp_engine.finish_scene_render(scene)
     proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(f"SHARP video ffmpeg streaming encode failed with code {proc.returncode}")
