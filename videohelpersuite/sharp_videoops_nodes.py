@@ -47,7 +47,7 @@ CAMERA_PRESETS = [
 
 PERFORMANCE_PRESETS = ["full", "viewer", "draft", "balanced", "quality", "custom"]
 RESOLUTION_MODES = ["auto_source", "custom", "720p", "1080p", "square_1024", "source"]
-SPLAT_QUALITIES = ["point", "fast", "balanced"]
+SPLAT_QUALITIES = ["point", "fast", "balanced", "quality"]
 RENDER_BACKENDS = ["auto", "gpu", "cpu"]
 RENDER_MODES = ["photo_composite", "source_static", "gaussian_color", "depth", "alpha"]
 
@@ -507,7 +507,7 @@ class VHSSharpRenderVideo:
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
                 "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
-                "source_photo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_photo_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
 
@@ -537,7 +537,7 @@ class VHSSharpRenderVideo:
         render_backend="auto",
         splat_quality="balanced",
         render_mode="photo_composite",
-        source_photo_strength=1.0,
+        source_photo_strength=0.0,
     ):
         out_w, out_h = _resolve_size(resolution_mode, int(width), int(height), _source_size_from_scene(scene))
         sharp_engine.log_info(
@@ -604,7 +604,7 @@ class VHSSharpImageToVideo:
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
                 "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
-                "source_photo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_photo_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
 
@@ -663,7 +663,7 @@ class VHSSharpImageToVideo:
             render_backend=str(kwargs.get("render_backend", "auto")),
             splat_quality=str(kwargs.get("splat_quality", "balanced")),
             render_mode=str(kwargs.get("render_mode", "photo_composite")),
-            source_photo_strength=float(kwargs.get("source_photo_strength", 1.0)),
+            source_photo_strength=float(kwargs.get("source_photo_strength", 0.0)),
         )
         video_path, filename = _encode_video(
             frames,

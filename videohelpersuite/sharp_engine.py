@@ -625,8 +625,8 @@ def _render_frame_gsplat(
     intrinsics = _sharp_intrinsics(scene, width, height, device)
     extrinsics = _official_extrinsics(scene, rig, t, width, height, device)
     quality = str(splat_quality or "balanced").lower()
-    eps2d = {"point": 0.05, "fast": 0.35, "balanced": 0.8}.get(quality, 0.8)
-    rasterize_mode = "antialiased" if quality == "balanced" else "classic"
+    eps2d = {"point": 0.05, "fast": 0.35, "balanced": 0.6, "quality": 1.0}.get(quality, 0.6)
+    rasterize_mode = "antialiased" if quality in {"balanced", "quality"} else "classic"
     scales = g.singular_values[0] * max(0.05, float(splat_size))
     opacities = (g.opacities[0] * max(0.0, float(opacity_gain))).clamp(0, 1)
     raster_kwargs = dict(
@@ -677,7 +677,8 @@ def _render_frame_gsplat(
         if mode == "photo_composite" and source_photo_strength > 0:
             src = F.interpolate(scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0), size=(int(height), int(width)), mode="bilinear", align_corners=False)
             strength = max(0.0, min(1.0, float(source_photo_strength)))
-            missing = (1.0 - rendered_alpha.clamp(0, 1)).pow(0.65) * strength
+            hole = ((0.08 - rendered_alpha.clamp(0, 1)) / 0.08).clamp(0, 1)
+            missing = hole.pow(1.5) * strength
             out = rendered_color * (1.0 - missing) + src * missing
         else:
             out = rendered_color
@@ -699,7 +700,7 @@ def render_frame(
     render_backend: str = "auto",
     splat_quality: str = "balanced",
     render_mode: str = "photo_composite",
-    source_photo_strength: float = 1.0,
+    source_photo_strength: float = 0.0,
 ) -> torch.Tensor:
     device = render_device(render_backend)
     mode = str(render_mode or "photo_composite").lower()
