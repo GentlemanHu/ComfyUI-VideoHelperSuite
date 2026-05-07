@@ -46,7 +46,7 @@ CAMERA_PRESETS = [
 ]
 
 PERFORMANCE_PRESETS = ["full", "viewer", "draft", "balanced", "quality", "custom"]
-RESOLUTION_MODES = ["auto_source", "custom", "720p", "1080p", "square_1024", "source"]
+RESOLUTION_MODES = ["auto_source", "custom", "720p", "1080p", "square_1024", "fit_1024", "source"]
 SPLAT_QUALITIES = ["point", "fast", "balanced", "quality"]
 RENDER_BACKENDS = ["auto", "gpu", "cpu"]
 RENDER_MODES = ["photo_composite", "source_static", "gaussian_color", "depth", "alpha"]
@@ -74,7 +74,7 @@ def _resolve_size(mode: str, width: int, height: int, source_size: tuple[int, in
     src_w, src_h = max(1, int(source_size[0])), max(1, int(source_size[1]))
     aspect = src_w / src_h
     key = str(mode or "custom")
-    if key == "source":
+    if key in {"auto_source", "source"}:
         return _even(src_w), _even(src_h)
     if key == "720p":
         return (_even(1280), _even(720)) if aspect >= 1 else (_even(720), _even(1280))
@@ -82,7 +82,7 @@ def _resolve_size(mode: str, width: int, height: int, source_size: tuple[int, in
         return (_even(1920), _even(1080)) if aspect >= 1 else (_even(1080), _even(1920))
     if key == "square_1024":
         return 1024, 1024
-    if key == "auto_source":
+    if key == "fit_1024":
         max_side = 1024
         if src_w >= src_h:
             return _even(max_side), _even(round(max_side / aspect))

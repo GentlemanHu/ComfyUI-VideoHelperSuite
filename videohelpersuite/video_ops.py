@@ -488,7 +488,7 @@ def render_font_preview_image(
         print(f"[Movis Font Preview] Warning: 预览将使用默认字体 family={safe_family!r}, style={safe_style!r}")
 
     supports_text = bool(report.get("supports_text", False))
-    if os.environ.get("VHS_MOVIS_FONT_PREVIEW_LOG", "0").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("VHS_MOVIS_FONT_PREVIEW_LOG", "1").strip().lower() in {"1", "true", "yes", "on"}:
         print(f"[Movis Font Preview] family={safe_family!r}, style={safe_style!r}, path={font_path!r}")
         print(f"[Movis Font Preview] text={text_value!r}, supports_text={supports_text}")
 

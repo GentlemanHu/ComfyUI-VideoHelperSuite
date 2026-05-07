@@ -19,6 +19,10 @@ _MOVIS_FONT_PREVIEW_CACHE = OrderedDict()
 _MOVIS_FONT_PREVIEW_CACHE_LIMIT = 128
 
 
+def _font_preview_log_enabled() -> bool:
+    return os.environ.get("VHS_MOVIS_FONT_PREVIEW_LOG", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _font_preview_cache_key(route: str, payload: dict) -> str:
     try:
         return route + ":" + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -51,6 +55,8 @@ async def movis_font_preview(request):
         cache_key = _font_preview_cache_key("font", payload)
         cached = _font_preview_cache_get(cache_key)
         if cached is not None:
+            if _font_preview_log_enabled():
+                print("[Movis Font Preview] cache hit: /movis/font_preview")
             return web.json_response(cached)
         # lazy import, avoid unnecessary heavy import at startup
         from .video_ops import render_font_preview_image, encode_preview_image_data_url
@@ -79,6 +85,8 @@ async def movis_font_preview(request):
             "style": meta.get("style"),
         }
         _font_preview_cache_set(cache_key, response)
+        if _font_preview_log_enabled():
+            print("[Movis Font Preview] rendered: /movis/font_preview")
         return web.json_response(response)
     except Exception as e:
         return web.json_response({"error": f"preview render failed: {e}"}, status=500)
@@ -95,6 +103,8 @@ async def movis_autocaption_preview(request):
         cache_key = _font_preview_cache_key("autocaption", payload)
         cached = _font_preview_cache_get(cache_key)
         if cached is not None:
+            if _font_preview_log_enabled():
+                print("[Movis Font Preview] cache hit: /movis/autocaption_preview")
             return web.json_response(cached)
         from .video_ops import render_font_preview_image, encode_preview_image_data_url
         from .nodes import resolve_autocaption_preview_style
@@ -139,6 +149,8 @@ async def movis_autocaption_preview(request):
             "applied_style": style.get("applied_style", {}),
         }
         _font_preview_cache_set(cache_key, response)
+        if _font_preview_log_enabled():
+            print("[Movis Font Preview] rendered: /movis/autocaption_preview")
         return web.json_response(response)
     except Exception as e:
         return web.json_response({"error": f"autocaption preview render failed: {e}"}, status=500)
