@@ -184,14 +184,14 @@ def _empty_frames(width: int, height: int) -> torch.Tensor:
     return torch.zeros((1, int(height), int(width), 3), dtype=torch.float32)
 
 
-def _encode_video(frames: list[torch.Tensor], fps: int, codec: str, output_prefix: str) -> tuple[str, str]:
-    sharp_engine.log_info(f"FFmpeg encode start: frames={len(frames)}, fps={fps}, codec={codec}, prefix={output_prefix}")
-    t0 = time.perf_counter()
+def _video_output_path(output_prefix: str) -> tuple[Path, str]:
     out_dir = Path(folder_paths.get_output_directory()) / "sharp_videoops"
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{output_prefix}_{int(time.time() * 1000)}.mp4"
-    out_path = out_dir / filename
-    h, w = frames[0].shape[:2]
+    return out_dir / filename, filename
+
+
+def _ffmpeg_rawvideo_command(width: int, height: int, fps: int, codec: str, out_path: Path) -> list[str]:
     ffmpeg_bin = ffmpeg_path or shutil.which("ffmpeg") or "ffmpeg"
     codec_map = {
         "h264": "libx264",
@@ -209,7 +209,7 @@ def _encode_video(frames: list[torch.Tensor], fps: int, codec: str, output_prefi
         "-pix_fmt",
         "rgb24",
         "-s",
-        f"{w}x{h}",
+        f"{int(width)}x{int(height)}",
         "-r",
         str(int(fps)),
         "-i",
@@ -224,11 +224,29 @@ def _encode_video(frames: list[torch.Tensor], fps: int, codec: str, output_prefi
     else:
         cmd += ["-preset", "fast", "-crf", "18"]
     cmd += ["-an", str(out_path)]
+    return cmd
+
+
+def _write_frame_to_ffmpeg(proc: subprocess.Popen, frame: torch.Tensor) -> None:
+    if proc.stdin is None:
+        raise RuntimeError("SHARP video ffmpeg stdin is not available")
+    arr = (frame.detach().cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
+    try:
+        proc.stdin.write(arr.tobytes())
+    finally:
+        del arr
+
+
+def _encode_video(frames: list[torch.Tensor], fps: int, codec: str, output_prefix: str) -> tuple[str, str]:
+    sharp_engine.log_info(f"FFmpeg encode start: frames={len(frames)}, fps={fps}, codec={codec}, prefix={output_prefix}")
+    t0 = time.perf_counter()
+    out_path, filename = _video_output_path(output_prefix)
+    h, w = frames[0].shape[:2]
+    cmd = _ffmpeg_rawvideo_command(int(w), int(h), int(fps), str(codec), out_path)
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     try:
         for frame in frames:
-            arr = (frame.detach().cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
-            proc.stdin.write(arr.tobytes())
+            _write_frame_to_ffmpeg(proc, frame)
     finally:
         if proc.stdin:
             proc.stdin.close()
@@ -303,6 +321,93 @@ def _render_frames(
             )
     sharp_engine.log_info(f"Render frames complete in {time.perf_counter() - t0:.2f}s")
     return frames
+
+
+def _render_video_streaming(
+    scene: sharp_engine.SharpScene,
+    camera: dict[str, Any],
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    duration: float,
+    splat_size: float,
+    opacity_gain: float,
+    exposure: float,
+    gamma: float,
+    background: str,
+    render_backend: str,
+    splat_quality: str,
+    render_mode: str,
+    source_photo_strength: float,
+    fill_alpha_holes: bool,
+    codec: str,
+    output_prefix: str,
+) -> tuple[str, str, int]:
+    total = max(1, int(round(float(duration) * int(fps))))
+    device = sharp_engine.render_device(render_backend)
+    gaussian_count = int(scene.gaussians.mean_vectors.reshape(-1, 3).shape[0])
+    megapixels = (int(width) * int(height)) / 1_000_000.0
+    out_path, filename = _video_output_path(output_prefix)
+    cmd = _ffmpeg_rawvideo_command(int(width), int(height), int(fps), str(codec), out_path)
+    sharp_engine.log_info(
+        f"Render video stream start: size={width}x{height}, fps={fps}, duration={duration}, "
+        f"frames={total}, gaussians={gaussian_count}, megapixels={megapixels:.2f}, "
+        f"backend={render_backend}, device={device}, splat_quality={splat_quality}, "
+        f"mode={render_mode}, codec={codec}, output_frames=False"
+    )
+    t0 = time.perf_counter()
+    pbar = ProgressBar(total)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        for i in range(total):
+            frame_t0 = time.perf_counter()
+            tau = i / max(total - 1, 1)
+            if i == 0:
+                sharp_engine.log_info("Render first frame start: streaming directly to ffmpeg")
+            frame = sharp_engine.render_frame(
+                scene,
+                camera,
+                tau,
+                int(width),
+                int(height),
+                splat_size=float(splat_size),
+                opacity_gain=float(opacity_gain),
+                exposure=float(exposure),
+                gamma=float(gamma),
+                background=_bg(background),
+                render_backend=render_backend,
+                splat_quality=splat_quality,
+                render_mode=render_mode,
+                source_photo_strength=float(source_photo_strength),
+                fill_alpha_holes=bool(fill_alpha_holes),
+            )
+            _write_frame_to_ffmpeg(proc, frame)
+            del frame
+            pbar.update_absolute(i + 1, total)
+            if i == 0 or (i + 1) % max(1, total // 8) == 0 or i == total - 1:
+                sharp_engine.log_info(
+                    f"Render stream progress: {i + 1}/{total} frames, "
+                    f"last_frame={time.perf_counter() - frame_t0:.3f}s"
+                )
+    except Exception:
+        if proc.stdin:
+            proc.stdin.close()
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"SHARP video ffmpeg streaming encode failed with code {proc.returncode}")
+    size_mb = out_path.stat().st_size / (1024 * 1024) if out_path.exists() else 0.0
+    sharp_engine.log_info(
+        f"Render video stream complete in {time.perf_counter() - t0:.2f}s: "
+        f"{out_path} ({size_mb:.2f} MB)"
+    )
+    return str(out_path), filename, total
 
 
 def _scene_info(scene: sharp_engine.SharpScene) -> str:
@@ -546,31 +651,56 @@ class VHSSharpRenderVideo:
         out_w, out_h = _resolve_size(resolution_mode, int(width), int(height), _source_size_from_scene(scene))
         sharp_engine.log_info(
             f"Node RenderVideo start: camera={camera.get('name', 'custom')}, "
-            f"resolution_mode={resolution_mode}, output={out_w}x{out_h}, codec={video_codec}"
+            f"resolution_mode={resolution_mode}, output={out_w}x{out_h}, "
+            f"codec={video_codec}, output_frames={bool(output_frames)}"
         )
-        frames = _render_frames(
-            scene,
-            camera,
-            width=out_w,
-            height=out_h,
-            fps=int(fps),
-            duration=float(duration),
-            splat_size=float(splat_size),
-            opacity_gain=float(opacity_gain),
-            exposure=float(exposure),
-            gamma=float(gamma),
-            background=str(background),
-            render_backend=str(render_backend),
-            splat_quality=str(splat_quality),
-            render_mode=str(render_mode),
-            source_photo_strength=float(source_photo_strength),
-            fill_alpha_holes=bool(fill_alpha_holes),
-        )
-        video_path, filename = _encode_video(frames, int(fps), str(video_codec), str(output_prefix))
-        frame_count = len(frames)
-        frames_tensor = torch.stack(frames, dim=0) if output_frames else _empty_frames(out_w, out_h)
-        del frames
-        sharp_engine.release_runtime_memory("RenderVideo encoded; temporary frame list released")
+        if bool(output_frames):
+            frames = _render_frames(
+                scene,
+                camera,
+                width=out_w,
+                height=out_h,
+                fps=int(fps),
+                duration=float(duration),
+                splat_size=float(splat_size),
+                opacity_gain=float(opacity_gain),
+                exposure=float(exposure),
+                gamma=float(gamma),
+                background=str(background),
+                render_backend=str(render_backend),
+                splat_quality=str(splat_quality),
+                render_mode=str(render_mode),
+                source_photo_strength=float(source_photo_strength),
+                fill_alpha_holes=bool(fill_alpha_holes),
+            )
+            video_path, filename = _encode_video(frames, int(fps), str(video_codec), str(output_prefix))
+            frame_count = len(frames)
+            frames_tensor = torch.stack(frames, dim=0)
+            del frames
+            sharp_engine.release_runtime_memory("RenderVideo encoded; temporary frame list released")
+        else:
+            video_path, filename, frame_count = _render_video_streaming(
+                scene,
+                camera,
+                width=out_w,
+                height=out_h,
+                fps=int(fps),
+                duration=float(duration),
+                splat_size=float(splat_size),
+                opacity_gain=float(opacity_gain),
+                exposure=float(exposure),
+                gamma=float(gamma),
+                background=str(background),
+                render_backend=str(render_backend),
+                splat_quality=str(splat_quality),
+                render_mode=str(render_mode),
+                source_photo_strength=float(source_photo_strength),
+                fill_alpha_holes=bool(fill_alpha_holes),
+                codec=str(video_codec),
+                output_prefix=str(output_prefix),
+            )
+            frames_tensor = _empty_frames(out_w, out_h)
+            sharp_engine.release_runtime_memory("RenderVideo streaming encode complete")
         return {
             "ui": {"video": [{"filename": filename, "subfolder": "sharp_videoops", "type": "output"}]},
             "result": (os.path.abspath(video_path), frames_tensor, frame_count, float(duration)),
@@ -638,7 +768,8 @@ class VHSSharpImageToVideo:
             f"Node ImageToVideo start: camera={camera_preset}, source={source_size[0]}x{source_size[1]}, "
             f"output={out_w}x{out_h}, resolution_mode={kwargs.get('resolution_mode', 'auto_source')}, "
             f"preset={performance_preset}, gaussian_budget={budget}, min_opacity={min_opacity_value}, "
-            f"render_mode={kwargs.get('render_mode', 'photo_composite')}, codec={kwargs.get('video_codec', 'h264')}"
+            f"render_mode={kwargs.get('render_mode', 'photo_composite')}, codec={kwargs.get('video_codec', 'h264')}, "
+            f"output_frames={bool(kwargs.get('output_frames', False))}"
         )
         scene = sharp_engine.make_scene(
             image,
@@ -657,34 +788,58 @@ class VHSSharpImageToVideo:
             "pitch": float(kwargs.get("pitch", 0.0)),
             "phase": 0.0,
         }
-        frames = _render_frames(
-            scene,
-            camera,
-            width=out_w,
-            height=out_h,
-            fps=int(kwargs.get("fps", 24)),
-            duration=float(kwargs.get("duration", 4.0)),
-            splat_size=float(kwargs.get("splat_size", 1.0)),
-            opacity_gain=float(kwargs.get("opacity_gain", 1.25)),
-            exposure=float(kwargs.get("exposure", 1.0)),
-            gamma=float(kwargs.get("gamma", 1.0)),
-            background=str(kwargs.get("background", "black")),
-            render_backend=str(kwargs.get("render_backend", "auto")),
-            splat_quality=str(kwargs.get("splat_quality", "quality")),
-            render_mode=str(kwargs.get("render_mode", "photo_composite")),
-            source_photo_strength=float(kwargs.get("source_photo_strength", 0.0)),
-            fill_alpha_holes=bool(kwargs.get("fill_alpha_holes", False)),
-        )
-        video_path, filename = _encode_video(
-            frames,
-            int(kwargs.get("fps", 24)),
-            str(kwargs.get("video_codec", "h264")),
-            str(kwargs.get("output_prefix", "sharp_image_to_video")),
-        )
-        frames_tensor = torch.stack(frames, dim=0) if kwargs.get("output_frames", False) else _empty_frames(out_w, out_h)
-        frame_count = len(frames)
-        del frames
-        sharp_engine.release_runtime_memory("ImageToVideo encoded; temporary frame list released")
+        if bool(kwargs.get("output_frames", False)):
+            frames = _render_frames(
+                scene,
+                camera,
+                width=out_w,
+                height=out_h,
+                fps=int(kwargs.get("fps", 24)),
+                duration=float(kwargs.get("duration", 4.0)),
+                splat_size=float(kwargs.get("splat_size", 1.0)),
+                opacity_gain=float(kwargs.get("opacity_gain", 1.25)),
+                exposure=float(kwargs.get("exposure", 1.0)),
+                gamma=float(kwargs.get("gamma", 1.0)),
+                background=str(kwargs.get("background", "black")),
+                render_backend=str(kwargs.get("render_backend", "auto")),
+                splat_quality=str(kwargs.get("splat_quality", "quality")),
+                render_mode=str(kwargs.get("render_mode", "photo_composite")),
+                source_photo_strength=float(kwargs.get("source_photo_strength", 0.0)),
+                fill_alpha_holes=bool(kwargs.get("fill_alpha_holes", False)),
+            )
+            video_path, filename = _encode_video(
+                frames,
+                int(kwargs.get("fps", 24)),
+                str(kwargs.get("video_codec", "h264")),
+                str(kwargs.get("output_prefix", "sharp_image_to_video")),
+            )
+            frames_tensor = torch.stack(frames, dim=0)
+            frame_count = len(frames)
+            del frames
+            sharp_engine.release_runtime_memory("ImageToVideo encoded; temporary frame list released")
+        else:
+            video_path, filename, frame_count = _render_video_streaming(
+                scene,
+                camera,
+                width=out_w,
+                height=out_h,
+                fps=int(kwargs.get("fps", 24)),
+                duration=float(kwargs.get("duration", 4.0)),
+                splat_size=float(kwargs.get("splat_size", 1.0)),
+                opacity_gain=float(kwargs.get("opacity_gain", 1.25)),
+                exposure=float(kwargs.get("exposure", 1.0)),
+                gamma=float(kwargs.get("gamma", 1.0)),
+                background=str(kwargs.get("background", "black")),
+                render_backend=str(kwargs.get("render_backend", "auto")),
+                splat_quality=str(kwargs.get("splat_quality", "quality")),
+                render_mode=str(kwargs.get("render_mode", "photo_composite")),
+                source_photo_strength=float(kwargs.get("source_photo_strength", 0.0)),
+                fill_alpha_holes=bool(kwargs.get("fill_alpha_holes", False)),
+                codec=str(kwargs.get("video_codec", "h264")),
+                output_prefix=str(kwargs.get("output_prefix", "sharp_image_to_video")),
+            )
+            frames_tensor = _empty_frames(out_w, out_h)
+            sharp_engine.release_runtime_memory("ImageToVideo streaming encode complete")
         info = _scene_info(scene)
         return {
             "ui": {"video": [{"filename": filename, "subfolder": "sharp_videoops", "type": "output"}]},
