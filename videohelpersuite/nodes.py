@@ -27,6 +27,7 @@ from .image_latent_nodes import *
 from .load_video_nodes import LoadVideoUpload, LoadVideoPath, LoadVideoFFmpegUpload, LoadVideoFFmpegPath, LoadImagePath
 from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDirectoryPath
 from .batched_nodes import VAEEncodeBatched, VAEDecodeBatched
+from .memory_nodes import MemoryCleanupPassthrough
 from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, \
         gifski_path, calculate_file_hash, strip_path, try_download_video, is_url, \
         imageOrLatent, BIGMAX, merge_filter_args, ENCODE_ARGS, floatOrInt, cached, \
@@ -1119,6 +1120,7 @@ class Unbatch:
     @classmethod
     def VALIDATE_INPUTS(cls, input_types):
         return True
+
 
 class SelectLatest:
     @classmethod
@@ -2916,6 +2918,7 @@ NODE_CLASS_MAPPINGS = {
     "VHS_SelectImages": SelectImages,
     "VHS_SelectMasks": SelectMasks,
     "VHS_Unbatch": Unbatch,
+    "VHS_MemoryCleanupPassthrough": MemoryCleanupPassthrough,
     "VHS_SelectLatest": SelectLatest,
 }
 
@@ -2962,6 +2965,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_SelectImages": "Select Images 🎥🅥🅗🅢",
     "VHS_SelectMasks": "Select Masks 🎥🅥🅗🅢",
     "VHS_Unbatch":  "Unbatch 🎥🅥🅗🅢",
+    "VHS_MemoryCleanupPassthrough": "Memory Cleanup Passthrough 🧹🎥🅥🅗🅢",
     "VHS_SelectLatest": "Select Latest 🎥🅥🅗🅢",
 }
 
