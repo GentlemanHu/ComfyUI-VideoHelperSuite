@@ -11,6 +11,7 @@ import numpy as np
 import re
 import datetime
 import tempfile
+import gc
 from typing import List
 import torch
 from PIL import Image, ExifTags
@@ -1254,13 +1255,16 @@ if HAS_CUSTOM_FEATURES:
 
             cp = GentleCaption()
             params = cp.parse_caption_params(caption_json_param)
-            _real_filename, output_path, frames = cp.make_video(
-                bg_video_path=video_path,
-                bg_audio_path=audio_path,
-                output_filename=output_filename,
-                extra_para=params,
-                is_vertical=is_vertical,
-            )
+            try:
+                _real_filename, output_path, frames = cp.make_video(
+                    bg_video_path=video_path,
+                    bg_audio_path=audio_path,
+                    output_filename=output_filename,
+                    extra_para=params,
+                    is_vertical=is_vertical,
+                )
+            finally:
+                cp.release_model()
             if notify_all:
                 notifyAll(output_path, f"{notify_message}")
             return {
@@ -1335,13 +1339,16 @@ if HAS_CUSTOM_FEATURES:
                 self.cp = GentleCaption()
 
             params = self.cp.parse_caption_params(caption_json_param)
-            real_filename, video_result, frames = self.cp.make_video(
-                bg_video_path=video_path,
-                bg_audio_path=audio_path,
-                output_filename=output_filename,
-                extra_para=params,
-                is_vertical=is_vertical,
-            )
+            try:
+                real_filename, video_result, frames = self.cp.make_video(
+                    bg_video_path=video_path,
+                    bg_audio_path=audio_path,
+                    output_filename=output_filename,
+                    extra_para=params,
+                    is_vertical=is_vertical,
+                )
+            finally:
+                self.cp.release_model()
 
             if notify_all:
                 notifyAll(video_result, f"{notify_message}")
@@ -1553,13 +1560,16 @@ if HAS_CUSTOM_FEATURES:
             if pbar is not None:
                 pbar.update(1)
 
-            real_filename, video_result, frames = self.cp.make_video(
-                bg_video_path=video_path,
-                bg_audio_path=resolved_audio_path,
-                output_filename=output_filename,
-                extra_para=params,
-                is_vertical=is_vertical,
-            )
+            try:
+                real_filename, video_result, frames = self.cp.make_video(
+                    bg_video_path=video_path,
+                    bg_audio_path=resolved_audio_path,
+                    output_filename=output_filename,
+                    extra_para=params,
+                    is_vertical=is_vertical,
+                )
+            finally:
+                self.cp.release_model()
             if pbar is not None:
                 pbar.update(2)
 
@@ -1681,6 +1691,52 @@ if HAS_CUSTOM_FEATURES:
             self.cp = None
             self._has_audio_cache = {}
             self._font_name_cache = None
+
+        def _env_flag(self, name: str) -> bool | None:
+            raw = os.environ.get(name)
+            if raw is None:
+                return None
+            value = raw.strip().lower()
+            if value in {"1", "true", "yes", "on", "enable", "enabled"}:
+                return True
+            if value in {"0", "false", "no", "off", "disable", "disabled"}:
+                return False
+            return None
+
+        def _keep_asr_model_loaded(self) -> bool:
+            forced = self._env_flag("VHS_MOVIS_KEEP_ASR_MODEL")
+            if forced is not None:
+                return forced
+            policy = str(os.environ.get("VHS_MOVIS_MEMORY_POLICY", "auto")).strip().lower()
+            return policy in {"aggressive", "fast", "keep", "cache"}
+
+        def _release_runtime_memory(self, *, release_model: bool = False) -> None:
+            if release_model and self.cp is not None:
+                try:
+                    self.cp.release_model()
+                except Exception:
+                    try:
+                        self.cp.model = None
+                    except Exception:
+                        pass
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+
+        def _segment_to_dict(self, seg):
+            if isinstance(seg, dict):
+                st = self._safe_float(seg.get("start", 0.0), 0.0)
+                et = self._safe_float(seg.get("end", st), st)
+                txt = str(seg.get("text", "")).strip()
+            else:
+                st = self._safe_float(getattr(seg, "start", 0.0), 0.0)
+                et = self._safe_float(getattr(seg, "end", st), st)
+                txt = str(getattr(seg, "text", "")).strip()
+            return {"start": float(st or 0.0), "end": float(et if et is not None else st or 0.0), "text": txt}
 
         def _normalize_text_align(self, value: str) -> str:
             align = str(value or "center").strip().lower()
@@ -2163,17 +2219,19 @@ if HAS_CUSTOM_FEATURES:
             cache_key = f"{path}@@kw:{kwargs_key}"
             if cache_key in cache:
                 return cache[cache_key]
+            transcribe = None
             try:
                 self.cp._ensure_model()
                 call_kwargs = {"regroup": True, "fp16": torch.cuda.is_available()}
                 call_kwargs.update(kwargs)
                 transcribe = self.cp.model.transcribe(path, **call_kwargs)
-                segs = self._extract_segments(transcribe)
+                raw_segs = self._extract_segments(transcribe)
+                segs = [self._segment_to_dict(seg) for seg in raw_segs]
                 cache[cache_key] = segs
                 if len(segs) > 0:
                     try:
-                        first_st = float(segs[0].get("start", 0.0)) if isinstance(segs[0], dict) else float(getattr(segs[0], "start", 0.0))
-                        last_et = float(segs[-1].get("end", first_st)) if isinstance(segs[-1], dict) else float(getattr(segs[-1], "end", first_st))
+                        first_st = float(segs[0].get("start", 0.0))
+                        last_et = float(segs[-1].get("end", first_st))
                         logger.info(
                             f"[MovisAutoCaptionTimeline] 识别完成: {path} | segments={len(segs)} | "
                             f"first={first_st:.3f}s last={last_et:.3f}s"
@@ -2187,6 +2245,9 @@ if HAS_CUSTOM_FEATURES:
                 logger.warn(f"[MovisAutoCaptionTimeline] 识别失败，已跳过: {path} | {e}")
                 cache[cache_key] = []
                 return []
+            finally:
+                transcribe = None
+                self._release_runtime_memory(release_model=not self._keep_asr_model_loaded())
 
         def _transcribe_window_cached(self, path, window_start, window_duration, cache, transcribe_kwargs=None):
             """仅转写音频窗口，减少超长 BGM 的无效识别耗时。"""
@@ -2300,6 +2361,11 @@ if HAS_CUSTOM_FEATURES:
 
             if self.cp is None:
                 self.cp = GentleCaption()
+            logger.info(
+                "[MovisAutoCaptionTimeline] 内存策略: "
+                f"policy={os.environ.get('VHS_MOVIS_MEMORY_POLICY', 'auto')}, "
+                f"keep_asr_model={self._keep_asr_model_loaded()}"
+            )
             pbar = ProgressBar(5) if show_progress else None
 
             t = json.loads(json.dumps(timeline))
@@ -2722,6 +2788,11 @@ if HAS_CUSTOM_FEATURES:
             if pbar is not None:
                 pbar.update(1)
 
+            try:
+                transcribe_cache.clear()
+            except Exception:
+                pass
+            self._release_runtime_memory(release_model=not self._keep_asr_model_loaded())
             return (t, count, drift_ms, sync_ok, json.dumps(style, ensure_ascii=False, indent=2))
 
 

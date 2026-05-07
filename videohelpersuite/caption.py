@@ -1,4 +1,5 @@
 import datetime
+import gc
 import json
 import math
 import os
@@ -93,6 +94,16 @@ class GentleCaption:
         if whisper is None:
             raise RuntimeError("stable_whisper 不可用，请安装 requirements.txt 中对应依赖")
         self.model = whisper.load_model("base")
+
+    def release_model(self) -> None:
+        self.model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
 
     def _parse_float(self, raw: str, field_name: str) -> float:
         text = (raw or "").strip()
@@ -196,14 +207,24 @@ class GentleCaption:
         srt_filename = os.path.join(path, f"{stamp}.srt")
         ass_filename = os.path.join(path, f"{stamp}.ass")
 
-        transcribe = self.model.transcribe(
-            audio_file,
-            regroup=True,
-            fp16=torch.cuda.is_available(),
-        )
-        transcribe.split_by_gap(0.5).split_by_length(38).merge_by_gap(0.15, max_words=2)
-        transcribe.to_srt_vtt(str(Path(srt_filename).resolve()), word_level=True)
-        transcribe.to_ass(str(Path(ass_filename).resolve()), **word_dict)
+        transcribe = None
+        try:
+            transcribe = self.model.transcribe(
+                audio_file,
+                regroup=True,
+                fp16=torch.cuda.is_available(),
+            )
+            transcribe.split_by_gap(0.5).split_by_length(38).merge_by_gap(0.15, max_words=2)
+            transcribe.to_srt_vtt(str(Path(srt_filename).resolve()), word_level=True)
+            transcribe.to_ass(str(Path(ass_filename).resolve()), **word_dict)
+        finally:
+            transcribe = None
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
         return str(Path(ass_filename).resolve())
 
     def make_video(

@@ -141,6 +141,13 @@ def _should_keep_gaussians_on_gpu() -> bool:
     return _sharp_memory_policy() == "aggressive"
 
 
+def _should_keep_predictor_loaded() -> bool:
+    forced = _env_flag("VHS_SHARP_KEEP_MODEL")
+    if forced is not None:
+        return forced
+    return _sharp_memory_policy() == "aggressive"
+
+
 def _clear_encode_cache() -> None:
     global _encode_cache
     _encode_cache = {
@@ -162,6 +169,15 @@ def _release_torch_cache() -> None:
             torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+def release_model_cache(reason: str = "memory policy") -> None:
+    global _model_patcher, _model_config
+    _model_patcher = None
+    _model_config = None
+    _clear_encode_cache()
+    _release_torch_cache()
+    log_info(f"Model cache released: {reason}")
 
 
 def model_config(precision: str = "auto") -> dict[str, str]:
@@ -294,7 +310,8 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
     log_info(
         "Memory policy: "
         f"policy={_sharp_memory_policy()}, encode_cache={'on' if cache_enabled else 'off'}, "
-        f"keep_scene_gpu={'on' if keep_scene_gpu else 'off'}, available_ram={ram_text}"
+        f"keep_scene_gpu={'on' if keep_scene_gpu else 'off'}, "
+        f"keep_model={'on' if _should_keep_predictor_loaded() else 'off'}, available_ram={ram_text}"
     )
     if not cache_enabled and _encode_cache["image_hash"] is not None:
         log_info("Encode cache cleared: memory policy avoids CPU feature copies")
@@ -418,6 +435,8 @@ def make_scene(
         ply_path = str(out_dir / f"{output_prefix}_{int(time.time() * 1000)}.ply")
         gauss_mod.save_ply(gaussians, focal_px, (height, width), Path(ply_path))
         log_info(f"PLY saved: {ply_path}")
+    if not _should_keep_predictor_loaded():
+        release_model_cache("scene built; VHS_SHARP_KEEP_MODEL is off")
     log_info(f"Build scene complete in {time.perf_counter() - t0:.2f}s, radius={radius:.4f}")
     return SharpScene(
         gaussians=gaussians,
