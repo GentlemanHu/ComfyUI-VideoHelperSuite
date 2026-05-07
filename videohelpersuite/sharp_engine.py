@@ -615,6 +615,7 @@ def _render_frame_gsplat(
     splat_quality: str,
     render_mode: str,
     source_photo_strength: float,
+    fill_alpha_holes: bool,
 ) -> torch.Tensor | None:
     global _gsplat_info_emitted, _gsplat_warning_emitted
     device = render_device(render_backend)
@@ -692,7 +693,7 @@ def _render_frame_gsplat(
         if bg_name == "white":
             rendered_color = rendered_color + (1.0 - rendered_alpha)
         rendered_color = cs_utils.linearRGB2sRGB(rendered_color.clamp(0, 1))
-        if mode == "photo_composite":
+        if mode == "photo_composite" and bool(fill_alpha_holes):
             rendered_color = _fill_alpha_holes(rendered_color, rendered_alpha, quality)
         if mode == "photo_composite" and source_photo_strength > 0:
             src = F.interpolate(scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0), size=(int(height), int(width)), mode="bilinear", align_corners=False)
@@ -721,6 +722,7 @@ def render_frame(
     splat_quality: str = "balanced",
     render_mode: str = "photo_composite",
     source_photo_strength: float = 0.0,
+    fill_alpha_holes: bool = False,
 ) -> torch.Tensor:
     device = render_device(render_backend)
     mode = str(render_mode or "photo_composite").lower()
@@ -740,6 +742,7 @@ def render_frame(
         splat_quality,
         render_mode,
         source_photo_strength,
+        fill_alpha_holes,
     )
     if gsplat_frame is not None:
         canvas = (gsplat_frame * float(exposure)).clamp(0, 1)

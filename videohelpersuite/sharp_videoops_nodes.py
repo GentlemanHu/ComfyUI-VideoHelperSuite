@@ -257,6 +257,7 @@ def _render_frames(
     splat_quality: str,
     render_mode: str,
     source_photo_strength: float,
+    fill_alpha_holes: bool,
 ) -> list[torch.Tensor]:
     total = max(1, int(round(float(duration) * int(fps))))
     device = sharp_engine.render_device(render_backend)
@@ -291,6 +292,7 @@ def _render_frames(
             splat_quality=splat_quality,
             render_mode=render_mode,
             source_photo_strength=float(source_photo_strength),
+            fill_alpha_holes=bool(fill_alpha_holes),
         )
         frames.append(frame)
         pbar.update_absolute(i + 1, total)
@@ -505,9 +507,10 @@ class VHSSharpRenderVideo:
                 "output_frames": ("BOOLEAN", {"default": True}),
                 "resolution_mode": (RESOLUTION_MODES, {"default": "custom"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
-                "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
+                "splat_quality": (SPLAT_QUALITIES, {"default": "quality"}),
                 "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
                 "source_photo_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "fill_alpha_holes": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -535,9 +538,10 @@ class VHSSharpRenderVideo:
         output_frames=True,
         resolution_mode="custom",
         render_backend="auto",
-        splat_quality="balanced",
+        splat_quality="quality",
         render_mode="photo_composite",
         source_photo_strength=0.0,
+        fill_alpha_holes=False,
     ):
         out_w, out_h = _resolve_size(resolution_mode, int(width), int(height), _source_size_from_scene(scene))
         sharp_engine.log_info(
@@ -560,6 +564,7 @@ class VHSSharpRenderVideo:
             splat_quality=str(splat_quality),
             render_mode=str(render_mode),
             source_photo_strength=float(source_photo_strength),
+            fill_alpha_holes=bool(fill_alpha_holes),
         )
         video_path, filename = _encode_video(frames, int(fps), str(video_codec), str(output_prefix))
         frames_tensor = torch.stack(frames, dim=0) if output_frames else _empty_frames(out_w, out_h)
@@ -602,9 +607,10 @@ class VHSSharpImageToVideo:
                 "performance_preset": (PERFORMANCE_PRESETS, {"default": "full"}),
                 "resolution_mode": (RESOLUTION_MODES, {"default": "auto_source"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
-                "splat_quality": (SPLAT_QUALITIES, {"default": "balanced"}),
+                "splat_quality": (SPLAT_QUALITIES, {"default": "quality"}),
                 "render_mode": (RENDER_MODES, {"default": "photo_composite"}),
                 "source_photo_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "fill_alpha_holes": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -661,9 +667,10 @@ class VHSSharpImageToVideo:
             gamma=float(kwargs.get("gamma", 1.0)),
             background=str(kwargs.get("background", "black")),
             render_backend=str(kwargs.get("render_backend", "auto")),
-            splat_quality=str(kwargs.get("splat_quality", "balanced")),
+            splat_quality=str(kwargs.get("splat_quality", "quality")),
             render_mode=str(kwargs.get("render_mode", "photo_composite")),
             source_photo_strength=float(kwargs.get("source_photo_strength", 0.0)),
+            fill_alpha_holes=bool(kwargs.get("fill_alpha_holes", False)),
         )
         video_path, filename = _encode_video(
             frames,
