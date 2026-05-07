@@ -592,7 +592,7 @@ def _pil_to_comfy_image(img: Image.Image):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
-def _check_nvenc_available() -> bool:
+def _check_nvenc_available() -> tuple[bool, str]:
     """Probe whether h264_nvenc is usable on this ffmpeg build."""
     ff = ffmpeg_path or "ffmpeg"
     try:
@@ -606,9 +606,44 @@ def _check_nvenc_available() -> bool:
             capture_output=True,
             timeout=10,
         )
-        return r.returncode == 0
-    except Exception:
-        return False
+        if r.returncode == 0:
+            return True, "ok"
+        message = (r.stderr or r.stdout or b"").decode("utf-8", errors="ignore").strip()
+        return False, message[-500:] or f"ffmpeg returned {r.returncode}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _movis_codec_settings() -> tuple[str, list[str]]:
+    requested = str(os.environ.get("VHS_MOVIS_VIDEO_CODEC", "auto")).strip().lower()
+    if requested in {"nvenc", "gpu"}:
+        requested = "h264_nvenc"
+    if requested in {"x264", "cpu"}:
+        requested = "libx264"
+    if requested not in {"auto", "h264_nvenc", "libx264"}:
+        requested = "auto"
+
+    nvenc_ok, nvenc_reason = _check_nvenc_available()
+    if requested == "h264_nvenc" and not nvenc_ok:
+        print(f"[VHS_MOVIS] requested h264_nvenc but unavailable: {nvenc_reason}; falling back to libx264")
+        requested = "libx264"
+    codec = "h264_nvenc" if requested == "auto" and nvenc_ok else requested
+    if codec == "auto":
+        codec = "libx264"
+
+    if codec == "h264_nvenc":
+        preset = str(os.environ.get("VHS_MOVIS_NVENC_PRESET", "p4")).strip()
+        cq = str(os.environ.get("VHS_MOVIS_NVENC_CQ", "19")).strip()
+        params = ["-preset", preset, "-rc", "vbr", "-cq", cq, "-movflags", "+faststart"]
+        print(f"[VHS_MOVIS] video codec: h264_nvenc preset={preset} cq={cq}")
+    else:
+        preset = str(os.environ.get("VHS_MOVIS_X264_PRESET", "veryfast")).strip()
+        crf = str(os.environ.get("VHS_MOVIS_X264_CRF", "18")).strip()
+        params = ["-preset", preset, "-crf", crf, "-movflags", "+faststart"]
+        if requested == "auto" and not nvenc_ok:
+            print(f"[VHS_MOVIS] h264_nvenc unavailable: {nvenc_reason}")
+        print(f"[VHS_MOVIS] video codec: libx264 preset={preset} crf={crf}")
+    return codec, params
 
 
 def _split_paths(value: str) -> list[str]:
@@ -2821,9 +2856,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
         return original_write_video(self, start_time, end_time, fps_value, _WriterProxy(writer))
 
     mv.layer.Composition._write_video = _write_video_with_progress
-    # Choose GPU encoder (h264_nvenc) when available, fall back to CPU libx264
-    _movis_codec = "h264_nvenc" if _check_nvenc_available() else "libx264"
-    print(f"[VHS_MOVIS] video codec: {_movis_codec}")
+    _movis_codec, _movis_output_params = _movis_codec_settings()
     try:
         scene.write_video(
             out_path,
@@ -2831,7 +2864,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
             pixelformat="yuv420p",
             fps=fps,
             audio=True,
-            output_params=["-movflags", "+faststart"],
+            output_params=_movis_output_params,
         )
     except Exception as _enc_err:
         if _movis_codec != "libx264":
@@ -2842,7 +2875,7 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
                 pixelformat="yuv420p",
                 fps=fps,
                 audio=True,
-                output_params=["-movflags", "+faststart"],
+                output_params=["-preset", "veryfast", "-crf", "18", "-movflags", "+faststart"],
             )
         else:
             raise
