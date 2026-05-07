@@ -535,7 +535,7 @@ class VHSSharpRenderVideo:
         background="black",
         video_codec="h264",
         output_prefix="sharp_video",
-        output_frames=True,
+        output_frames=False,
         resolution_mode="custom",
         render_backend="auto",
         splat_quality="quality",

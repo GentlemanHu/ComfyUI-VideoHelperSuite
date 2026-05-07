@@ -152,7 +152,7 @@ def _should_unload_comfy_models_before_sharp() -> bool:
     forced = _env_flag("VHS_SHARP_UNLOAD_COMFY_MODELS")
     if forced is not None:
         return forced
-    return _sharp_memory_policy() != "aggressive"
+    return False
 
 
 def _clear_encode_cache() -> None:
@@ -201,7 +201,7 @@ def release_runtime_memory(reason: str = "runtime cleanup") -> None:
 
 def prepare_exclusive_model_load(reason: str = "SHARP model load") -> None:
     if not _should_unload_comfy_models_before_sharp():
-        log_info("Comfy model unload skipped before SHARP load: VHS_SHARP_UNLOAD_COMFY_MODELS=0 or aggressive policy")
+        log_info("Comfy model unload skipped before SHARP load: set VHS_SHARP_UNLOAD_COMFY_MODELS=1 to enable")
         return
     try:
         import comfy.model_management
