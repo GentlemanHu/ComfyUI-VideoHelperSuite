@@ -187,11 +187,11 @@ function installCameraPathEditor(node) {
     root.style.border = "1px solid #334155";
     root.style.borderRadius = "6px";
     root.style.boxSizing = "border-box";
-    root.style.height = "32px";
+    root.style.height = "256px";
     root.style.overflow = "hidden";
 
     const header = document.createElement("button");
-    header.textContent = "Open Path Editor";
+    header.textContent = "Close Path Editor";
     header.style.padding = "4px 8px";
     header.style.borderRadius = "4px";
     header.style.border = "1px solid #475569";
@@ -202,7 +202,7 @@ function installCameraPathEditor(node) {
     root.appendChild(header);
 
     const panel = document.createElement("div");
-    panel.style.display = "none";
+    panel.style.display = "flex";
     panel.style.flexDirection = "column";
     panel.style.gap = "6px";
     root.appendChild(panel);
@@ -388,7 +388,7 @@ function installCameraPathEditor(node) {
         serialize: false,
         hideOnZoom: false,
     });
-    let expanded = false;
+    let expanded = true;
     const setExpanded = (value) => {
         expanded = Boolean(value);
         panel.style.display = expanded ? "flex" : "none";
@@ -404,6 +404,24 @@ function installCameraPathEditor(node) {
     refresh();
 }
 
+function scheduleCameraPathEditor(node) {
+    if (!node || node.type !== "VHS_SHARP_CameraPath") {
+        return;
+    }
+    let attempts = 0;
+    const retry = () => {
+        if (findWidget(node, "sharp_camera_path_editor")) {
+            return;
+        }
+        installCameraPathEditor(node);
+        if (!findWidget(node, "sharp_camera_path_editor") && attempts < 30) {
+            attempts += 1;
+            setTimeout(retry, 100);
+        }
+    };
+    setTimeout(retry, 0);
+}
+
 app.registerExtension({
     name: "VideoHelperSuite.SHARP.CameraPath",
     async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -411,7 +429,15 @@ app.registerExtension({
             return;
         }
         chainCallback(nodeType.prototype, "onNodeCreated", function () {
-            installCameraPathEditor(this);
+            scheduleCameraPathEditor(this);
         });
+        chainCallback(nodeType.prototype, "onConfigure", function () {
+            scheduleCameraPathEditor(this);
+        });
+    },
+    async setup() {
+        for (const node of app.graph?._nodes || []) {
+            scheduleCameraPathEditor(node);
+        }
     },
 });
