@@ -7,6 +7,7 @@ import re
 import asyncio
 import av
 import json
+from collections import OrderedDict
 
 from .utils import is_url, get_sorted_dir_files_from_directory, ffmpeg_path, \
         validate_sequence, is_safe_path, strip_path, try_download_video, ENCODE_ARGS
@@ -14,6 +15,29 @@ from comfy.k_diffusion.utils import FolderOfImages
 
 
 web = server.web
+_MOVIS_FONT_PREVIEW_CACHE = OrderedDict()
+_MOVIS_FONT_PREVIEW_CACHE_LIMIT = 128
+
+
+def _font_preview_cache_key(route: str, payload: dict) -> str:
+    try:
+        return route + ":" + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return route + ":" + repr(sorted(payload.items()))
+
+
+def _font_preview_cache_get(key: str):
+    if key not in _MOVIS_FONT_PREVIEW_CACHE:
+        return None
+    value = _MOVIS_FONT_PREVIEW_CACHE.pop(key)
+    _MOVIS_FONT_PREVIEW_CACHE[key] = value
+    return value
+
+
+def _font_preview_cache_set(key: str, value: dict) -> None:
+    _MOVIS_FONT_PREVIEW_CACHE[key] = value
+    while len(_MOVIS_FONT_PREVIEW_CACHE) > _MOVIS_FONT_PREVIEW_CACHE_LIMIT:
+        _MOVIS_FONT_PREVIEW_CACHE.popitem(last=False)
 
 
 @server.PromptServer.instance.routes.post("/movis/font_preview")
@@ -24,6 +48,10 @@ async def movis_font_preview(request):
         return web.json_response({"error": "invalid json body"}, status=400)
 
     try:
+        cache_key = _font_preview_cache_key("font", payload)
+        cached = _font_preview_cache_get(cache_key)
+        if cached is not None:
+            return web.json_response(cached)
         # lazy import, avoid unnecessary heavy import at startup
         from .video_ops import render_font_preview_image, encode_preview_image_data_url
 
@@ -42,14 +70,16 @@ async def movis_font_preview(request):
             stroke_width=int(payload.get("stroke_width", 0)),
             stroke_color=str(payload.get("stroke_color", "#000000")),
         )
-        return web.json_response({
+        response = {
             "image": encode_preview_image_data_url(image),
             "font_path": meta.get("font_path"),
             "supports_text": bool(meta.get("supports_text", False)),
             "missing_chars": list(meta.get("missing_chars", [])),
             "family": meta.get("family"),
             "style": meta.get("style"),
-        })
+        }
+        _font_preview_cache_set(cache_key, response)
+        return web.json_response(response)
     except Exception as e:
         return web.json_response({"error": f"preview render failed: {e}"}, status=500)
 
@@ -62,6 +92,10 @@ async def movis_autocaption_preview(request):
         return web.json_response({"error": "invalid json body"}, status=400)
 
     try:
+        cache_key = _font_preview_cache_key("autocaption", payload)
+        cached = _font_preview_cache_get(cache_key)
+        if cached is not None:
+            return web.json_response(cached)
         from .video_ops import render_font_preview_image, encode_preview_image_data_url
         from .nodes import resolve_autocaption_preview_style
 
@@ -88,7 +122,7 @@ async def movis_autocaption_preview(request):
             stroke_width=int(style.get("stroke_width", 0)),
             stroke_color=str(style.get("stroke_color", "#000000")),
         )
-        return web.json_response({
+        response = {
             "image": encode_preview_image_data_url(image),
             "font_path": meta.get("font_path"),
             "supports_text": bool(meta.get("supports_text", False)),
@@ -103,7 +137,9 @@ async def movis_autocaption_preview(request):
                 "stroke_color": str(style.get("stroke_color", "#000000")),
             },
             "applied_style": style.get("applied_style", {}),
-        })
+        }
+        _font_preview_cache_set(cache_key, response)
+        return web.json_response(response)
     except Exception as e:
         return web.json_response({"error": f"autocaption preview render failed: {e}"}, status=500)
 

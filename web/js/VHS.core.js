@@ -2133,6 +2133,7 @@ app.registerExtension({
 
                 let timer = null;
                 let seq = 0;
+                let lastPayloadKey = "";
                 const watched = new Set([
                     "font_family", "font_style", "text", "font_size", "text_color", "bg_color",
                     "width", "height", "x", "y", "align", "stroke_width", "stroke_color",
@@ -2160,6 +2161,11 @@ app.registerExtension({
                         stroke_width: Number(getWidgetValue("stroke_width", 0)),
                         stroke_color: String(getWidgetValue("stroke_color", "#000000")),
                     };
+                    const payloadKey = JSON.stringify(payload);
+                    if (payloadKey === lastPayloadKey) {
+                        return;
+                    }
+                    lastPayloadKey = payloadKey;
 
                     try {
                         const resp = await fetch(api.apiURL("/movis/font_preview"), {
@@ -2194,7 +2200,6 @@ app.registerExtension({
                     if (!watched.has(w.name)) continue;
                     chainCallback(w, "callback", () => schedulePreview());
                 }
-                schedulePreview();
             });
         } else if (nodeData?.name == "VHS_MOVIS_AutoCaptionTimeline") {
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
@@ -2218,6 +2223,7 @@ app.registerExtension({
 
                 let timer = null;
                 let seq = 0;
+                let lastPayloadKey = "";
                 const watched = new Set([
                     "style_preset", "font_family", "font_style", "font_size", "text_color", "align",
                     "stroke_width", "stroke_color", "caption_json_param", "custom_override_json",
@@ -2249,6 +2255,11 @@ app.registerExtension({
                         bg_color: "#222222",
                         text: "自动字幕预览 AutoCaption Preview 中文 English 123",
                     };
+                    const payloadKey = JSON.stringify(payload);
+                    if (payloadKey === lastPayloadKey) {
+                        return;
+                    }
+                    lastPayloadKey = payloadKey;
 
                     try {
                         const resp = await fetch(api.apiURL("/movis/autocaption_preview"), {
@@ -2280,7 +2291,6 @@ app.registerExtension({
                     if (!watched.has(w.name)) continue;
                     chainCallback(w, "callback", () => schedulePreview());
                 }
-                schedulePreview();
             });
         } else if (nodeData?.name == "VHS_SaveImageSequence") {
             //Disabled for safety as VHS_SaveImageSequence is not currently merged
