@@ -584,6 +584,24 @@ def _official_extrinsics(scene: SharpScene, rig: dict[str, Any], t: float, width
     return _camera_matrix(eye, look_at, world_up, inverse=True)
 
 
+def _fill_alpha_holes(color: torch.Tensor, alpha: torch.Tensor, quality: str) -> torch.Tensor:
+    iterations = {"point": 1, "fast": 3, "balanced": 6, "quality": 10}.get(str(quality or "balanced").lower(), 6)
+    mask = (alpha > 0.04).float()
+    filled = color
+    kernel1 = torch.ones((1, 1, 3, 3), dtype=color.dtype, device=color.device)
+    kernel3 = kernel1.expand(3, 1, 3, 3)
+    for _ in range(iterations):
+        mask_sum = F.conv2d(mask, kernel1, padding=1)
+        color_sum = F.conv2d(filled * mask, kernel3, padding=1, groups=3)
+        fillable = (mask < 0.5) & (mask_sum > 0)
+        if not bool(fillable.any()):
+            break
+        neighbor_color = color_sum / mask_sum.clamp(min=1e-6)
+        filled = torch.where(fillable.expand(-1, 3, -1, -1), neighbor_color, filled)
+        mask = torch.where(fillable, torch.ones_like(mask), mask)
+    return filled
+
+
 def _render_frame_gsplat(
     scene: SharpScene,
     rig: dict[str, Any],
@@ -674,6 +692,8 @@ def _render_frame_gsplat(
         if bg_name == "white":
             rendered_color = rendered_color + (1.0 - rendered_alpha)
         rendered_color = cs_utils.linearRGB2sRGB(rendered_color.clamp(0, 1))
+        if mode == "photo_composite":
+            rendered_color = _fill_alpha_holes(rendered_color, rendered_alpha, quality)
         if mode == "photo_composite" and source_photo_strength > 0:
             src = F.interpolate(scene.source_image.to(device).permute(2, 0, 1).unsqueeze(0), size=(int(height), int(width)), mode="bilinear", align_corners=False)
             strength = max(0.0, min(1.0, float(source_photo_strength)))

@@ -101,7 +101,7 @@ def _resolve_budget(mode: str, max_gaussians: int) -> int:
     if key == "balanced":
         return 350000
     if key == "quality":
-        return 800000
+        return 0
     return int(max_gaussians)
 
 
