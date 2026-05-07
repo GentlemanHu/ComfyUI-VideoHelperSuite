@@ -504,7 +504,7 @@ class VHSSharpRenderVideo:
                 "background": (["black", "white", "gray", "transparent_black", "#101014"], {"default": "black"}),
                 "video_codec": (["h264", "h265", "h264-nvenc", "h265-nvenc"], {"default": "h264"}),
                 "output_prefix": ("STRING", {"default": "sharp_video"}),
-                "output_frames": ("BOOLEAN", {"default": True}),
+                "output_frames": ("BOOLEAN", {"default": False}),
                 "resolution_mode": (RESOLUTION_MODES, {"default": "custom"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
                 "splat_quality": (SPLAT_QUALITIES, {"default": "quality"}),
@@ -567,10 +567,13 @@ class VHSSharpRenderVideo:
             fill_alpha_holes=bool(fill_alpha_holes),
         )
         video_path, filename = _encode_video(frames, int(fps), str(video_codec), str(output_prefix))
+        frame_count = len(frames)
         frames_tensor = torch.stack(frames, dim=0) if output_frames else _empty_frames(out_w, out_h)
+        del frames
+        sharp_engine.release_runtime_memory("RenderVideo encoded; temporary frame list released")
         return {
             "ui": {"video": [{"filename": filename, "subfolder": "sharp_videoops", "type": "output"}]},
-            "result": (os.path.abspath(video_path), frames_tensor, len(frames), float(duration)),
+            "result": (os.path.abspath(video_path), frames_tensor, frame_count, float(duration)),
         }
 
 
@@ -603,7 +606,7 @@ class VHSSharpImageToVideo:
                 "video_codec": (["h264", "h265", "h264-nvenc", "h265-nvenc"], {"default": "h264"}),
                 "save_ply": ("BOOLEAN", {"default": True}),
                 "output_prefix": ("STRING", {"default": "sharp_image_to_video"}),
-                "output_frames": ("BOOLEAN", {"default": True}),
+                "output_frames": ("BOOLEAN", {"default": False}),
                 "performance_preset": (PERFORMANCE_PRESETS, {"default": "full"}),
                 "resolution_mode": (RESOLUTION_MODES, {"default": "auto_source"}),
                 "render_backend": (RENDER_BACKENDS, {"default": "auto"}),
@@ -678,7 +681,10 @@ class VHSSharpImageToVideo:
             str(kwargs.get("video_codec", "h264")),
             str(kwargs.get("output_prefix", "sharp_image_to_video")),
         )
-        frames_tensor = torch.stack(frames, dim=0) if kwargs.get("output_frames", True) else _empty_frames(out_w, out_h)
+        frames_tensor = torch.stack(frames, dim=0) if kwargs.get("output_frames", False) else _empty_frames(out_w, out_h)
+        frame_count = len(frames)
+        del frames
+        sharp_engine.release_runtime_memory("ImageToVideo encoded; temporary frame list released")
         info = _scene_info(scene)
         return {
             "ui": {"video": [{"filename": filename, "subfolder": "sharp_videoops", "type": "output"}]},

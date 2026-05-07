@@ -148,6 +148,13 @@ def _should_keep_predictor_loaded() -> bool:
     return _sharp_memory_policy() == "aggressive"
 
 
+def _should_unload_comfy_models_before_sharp() -> bool:
+    forced = _env_flag("VHS_SHARP_UNLOAD_COMFY_MODELS")
+    if forced is not None:
+        return forced
+    return _sharp_memory_policy() != "aggressive"
+
+
 def _clear_encode_cache() -> None:
     global _encode_cache
     _encode_cache = {
@@ -173,11 +180,37 @@ def _release_torch_cache() -> None:
 
 def release_model_cache(reason: str = "memory policy") -> None:
     global _model_patcher, _model_config
+    try:
+        import comfy.model_management
+        comfy.model_management.unload_all_models()
+        comfy.model_management.cleanup_models_gc()
+    except Exception:
+        pass
     _model_patcher = None
     _model_config = None
     _clear_encode_cache()
     _release_torch_cache()
     log_info(f"Model cache released: {reason}")
+
+
+def release_runtime_memory(reason: str = "runtime cleanup") -> None:
+    _release_torch_cache()
+    gc.collect()
+    log_info(f"Runtime memory cleanup: {reason}")
+
+
+def prepare_exclusive_model_load(reason: str = "SHARP model load") -> None:
+    if not _should_unload_comfy_models_before_sharp():
+        log_info("Comfy model unload skipped before SHARP load: VHS_SHARP_UNLOAD_COMFY_MODELS=0 or aggressive policy")
+        return
+    try:
+        import comfy.model_management
+        log_info(f"Unloading ComfyUI models before {reason}")
+        comfy.model_management.unload_all_models()
+        comfy.model_management.cleanup_models_gc()
+    except Exception as exc:
+        log_info(f"ComfyUI model unload skipped: {exc}")
+    _release_torch_cache()
 
 
 def model_config(precision: str = "auto") -> dict[str, str]:
@@ -291,6 +324,7 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
     import comfy.model_management
 
     from .apple_sharp import gaussians as gauss_mod
+    prepare_exclusive_model_load("RGBGaussianPredictor load")
     patcher = load_model(precision)
     predictor = patcher.model
     device = patcher.load_device
