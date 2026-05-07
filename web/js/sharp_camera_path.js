@@ -95,10 +95,24 @@ function hideBackingWidget(widget) {
     widget.draw = () => {};
 }
 
+function resizeCanvasForDisplay(canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width || canvas.clientWidth || 320));
+    const height = Math.max(1, Math.round(rect.height || canvas.clientHeight || 160));
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const bufferWidth = Math.round(width * dpr);
+    const bufferHeight = Math.round(height * dpr);
+    if (canvas.width !== bufferWidth || canvas.height !== bufferHeight) {
+        canvas.width = bufferWidth;
+        canvas.height = bufferHeight;
+    }
+    return { width, height, dpr };
+}
+
 function drawEditor(canvas, points, activeIndex, isRecording, mode, target) {
+    const { width, height, dpr } = resizeCanvasForDisplay(canvas);
     const ctx = canvas.getContext("2d");
-    const width = canvas.width;
-    const height = canvas.height;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = "#111827";
     ctx.fillRect(0, 0, width, height);
@@ -187,7 +201,8 @@ function installCameraPathEditor(node) {
     root.style.border = "1px solid #334155";
     root.style.borderRadius = "6px";
     root.style.boxSizing = "border-box";
-    root.style.height = "256px";
+    root.style.height = "100%";
+    root.style.minHeight = "256px";
     root.style.overflow = "hidden";
 
     const header = document.createElement("button");
@@ -199,19 +214,22 @@ function installCameraPathEditor(node) {
     header.style.color = "#e2e8f0";
     header.style.textAlign = "left";
     header.style.lineHeight = "16px";
+    header.style.flex = "0 0 28px";
     root.appendChild(header);
 
     const panel = document.createElement("div");
     panel.style.display = "flex";
     panel.style.flexDirection = "column";
     panel.style.gap = "6px";
+    panel.style.flex = "1 1 auto";
+    panel.style.minHeight = "0";
     root.appendChild(panel);
 
     const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 180;
     canvas.style.width = "100%";
-    canvas.style.height = "144px";
+    canvas.style.height = "100%";
+    canvas.style.minHeight = "120px";
+    canvas.style.flex = "1 1 auto";
     canvas.style.cursor = "crosshair";
     canvas.style.borderRadius = "4px";
     panel.appendChild(canvas);
@@ -220,6 +238,7 @@ function installCameraPathEditor(node) {
     modeRow.style.display = "grid";
     modeRow.style.gridTemplateColumns = "1fr 1fr";
     modeRow.style.gap = "4px";
+    modeRow.style.flex = "0 0 24px";
     panel.appendChild(modeRow);
     const modeSelect = document.createElement("select");
     for (const name of ["orbit", "pan", "dolly", "anchor"]) {
@@ -247,6 +266,7 @@ function installCameraPathEditor(node) {
     controls.style.display = "grid";
     controls.style.gridTemplateColumns = "repeat(4, 1fr)";
     controls.style.gap = "4px";
+    controls.style.flex = "0 0 58px";
     panel.appendChild(controls);
 
     const zInput = document.createElement("input");
@@ -255,6 +275,7 @@ function installCameraPathEditor(node) {
     zInput.max = "1";
     zInput.step = "0.01";
     zInput.value = "0";
+    zInput.style.flex = "0 0 18px";
     panel.appendChild(zInput);
 
     let points = parsePath(pathWidget.value);
@@ -392,7 +413,8 @@ function installCameraPathEditor(node) {
     const setExpanded = (value) => {
         expanded = Boolean(value);
         panel.style.display = expanded ? "flex" : "none";
-        root.style.height = expanded ? "256px" : "32px";
+        root.style.height = expanded ? "100%" : "32px";
+        root.style.minHeight = expanded ? "256px" : "32px";
         header.textContent = expanded ? "Close Path Editor" : "Open Path Editor";
         node.setSize([Math.max(node.size[0], 380), node.computeSize()[1]]);
         node.setDirtyCanvas?.(true, true);
@@ -400,6 +422,11 @@ function installCameraPathEditor(node) {
     };
     header.onclick = () => setExpanded(!expanded);
     editorWidget.computeSize = (width) => [width, expanded ? 264 : 40];
+    if (window.ResizeObserver) {
+        const observer = new ResizeObserver(() => refresh());
+        observer.observe(root);
+        observer.observe(canvas);
+    }
     node.setSize([Math.max(node.size[0], 380), node.computeSize()[1]]);
     refresh();
 }
