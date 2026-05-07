@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import gc
 import logging
 import os
 import platform
@@ -28,6 +29,7 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+logger.propagate = False
 
 SHARP_REPO_ID = "apple/Sharp"
 SHARP_FILENAME = "sharp_2572gikvuh.pt"
@@ -70,6 +72,96 @@ def models_dir() -> str:
 
 def log_info(message: str) -> None:
     logger.info(message)
+
+
+def _env_flag(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on", "enable", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "off", "disable", "disabled"}:
+        return False
+    return None
+
+
+def _available_ram_bytes() -> int | None:
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+        if hasattr(os, "sysconf"):
+            pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if isinstance(pages, int) and isinstance(page_size, int) and pages > 0 and page_size > 0:
+                return pages * page_size
+    except Exception:
+        return None
+    return None
+
+
+def _sharp_memory_policy() -> str:
+    raw = os.environ.get("VHS_SHARP_MEMORY_POLICY", "auto")
+    policy = str(raw).strip().lower().replace("-", "_")
+    aliases = {
+        "safe": "conservative",
+        "lowram": "conservative",
+        "low_ram": "conservative",
+        "balanced": "auto",
+        "normal": "auto",
+        "fast": "aggressive",
+        "max": "aggressive",
+        "full": "aggressive",
+    }
+    return aliases.get(policy, policy if policy in {"auto", "conservative", "aggressive"} else "auto")
+
+
+def _should_cache_encode() -> bool:
+    forced = _env_flag("VHS_SHARP_ENCODE_CACHE")
+    if forced is not None:
+        return forced
+    policy = _sharp_memory_policy()
+    if policy == "conservative":
+        return False
+    if policy == "aggressive":
+        return True
+    available = _available_ram_bytes()
+    if available is None:
+        return False
+    return available >= 12 * 1024**3
+
+
+def _should_keep_gaussians_on_gpu() -> bool:
+    forced = _env_flag("VHS_SHARP_KEEP_SCENE_GPU")
+    if forced is not None:
+        return forced
+    return _sharp_memory_policy() == "aggressive"
+
+
+def _clear_encode_cache() -> None:
+    global _encode_cache
+    _encode_cache = {
+        "image_hash": None,
+        "monodepth_output": None,
+        "image_resized": None,
+    }
+    gc.collect()
+
+
+def _release_torch_cache() -> None:
+    try:
+        import comfy.model_management
+        comfy.model_management.soft_empty_cache()
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def model_config(precision: str = "auto") -> dict[str, str]:
@@ -192,7 +284,22 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
     height, width = image_np.shape[:2]
     log_info(f"SHARP inference input: source={width}x{height}, internal={INTERNAL_SIZE}x{INTERNAL_SIZE}, focal_px={focal_px:.2f}")
     image_hash = _hash_image(image_np)
-    if _encode_cache["image_hash"] == image_hash:
+    cache_enabled = _should_cache_encode()
+    keep_scene_gpu = _should_keep_gaussians_on_gpu()
+    ram_available = _available_ram_bytes()
+    if ram_available is None:
+        ram_text = "unknown"
+    else:
+        ram_text = f"{ram_available / 1024**3:.2f} GiB"
+    log_info(
+        "Memory policy: "
+        f"policy={_sharp_memory_policy()}, encode_cache={'on' if cache_enabled else 'off'}, "
+        f"keep_scene_gpu={'on' if keep_scene_gpu else 'off'}, available_ram={ram_text}"
+    )
+    if not cache_enabled and _encode_cache["image_hash"] is not None:
+        log_info("Encode cache cleared: memory policy avoids CPU feature copies")
+        _clear_encode_cache()
+    if cache_enabled and _encode_cache["image_hash"] == image_hash:
         log_info("Encode cache hit: reusing monodepth features")
         monodepth_output = _monodepth_to(_encode_cache["monodepth_output"], device)
         image_resized = _encode_cache["image_resized"].to(device)
@@ -208,12 +315,16 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
         )
         monodepth_output, _ = predictor.encode(image_resized)
         log_info(f"Encode complete in {time.perf_counter() - t_encode:.2f}s")
-        _encode_cache = {
-            "image_hash": image_hash,
-            "monodepth_output": _monodepth_to(monodepth_output, "cpu"),
-            "image_resized": image_resized.detach().cpu(),
-        }
-        comfy.model_management.soft_empty_cache()
+        if cache_enabled:
+            _encode_cache = {
+                "image_hash": image_hash,
+                "monodepth_output": _monodepth_to(monodepth_output, "cpu"),
+                "image_resized": image_resized.detach().cpu(),
+            }
+            log_info("Encode cache stored on CPU for repeated renders")
+        else:
+            log_info("Encode cache disabled: decoding directly to avoid system OOM")
+        _release_torch_cache()
 
     disparity_factor = torch.tensor([float(focal_px) / float(width)], device=device)
     t_decode = time.perf_counter()
@@ -240,6 +351,12 @@ def predict_gaussians(image_np: np.ndarray, focal_px: float, precision: str = "a
         (INTERNAL_SIZE, INTERNAL_SIZE),
     )
     log_info(f"Unproject complete: gaussians={gaussians.mean_vectors.reshape(-1, 3).shape[0]}")
+    if not keep_scene_gpu:
+        t_offload = time.perf_counter()
+        gaussians = gaussians.to("cpu")
+        log_info(f"Gaussian scene offloaded to CPU in {time.perf_counter() - t_offload:.2f}s")
+    del gaussians_ndc, monodepth_output, image_resized, disparity_factor, intrinsics, extrinsics
+    _release_torch_cache()
     return gaussians
 
 
