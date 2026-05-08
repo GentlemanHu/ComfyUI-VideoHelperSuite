@@ -735,6 +735,7 @@ class SF_PipelineRender:
         import subprocess
         import hashlib
         import tempfile
+        import time
 
         pipe = pipeline
         canvas = dict(pipe["canvas"])
@@ -804,6 +805,13 @@ class SF_PipelineRender:
         collected = [] if output_frames else None
 
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        logger.info(
+            f"[SF Pipeline] Final compose/encode start: frames={total}, "
+            f"output_frames={bool(output_frames)}, codec={codec}, quality={quality}"
+        )
+        start_ts = time.monotonic()
+        last_report_ts = start_ts
+        report_every_frames = max(1, total // 20)
         try:
             for fi in range(total):
                 frame = _composite_all_layers(all_layers, fi, canvas, w, h)
@@ -812,11 +820,24 @@ class SF_PipelineRender:
                     collected.append(frame)
                 if pbar:
                     pbar.update_absolute(int(fi / total * 85))
-                if fi > 0 and fi % max(1, total // 10) == 0:
-                    logger.info(f"[SF Pipeline] Frame {fi}/{total} ({fi/total*100:.0f}%)")
+                now_ts = time.monotonic()
+                if (
+                    fi in {0, 1, 2}
+                    or fi + 1 == total
+                    or (fi > 0 and fi % report_every_frames == 0)
+                    or now_ts - last_report_ts >= 5.0
+                ):
+                    elapsed = max(0.001, now_ts - start_ts)
+                    fps_now = (fi + 1) / elapsed
+                    logger.info(
+                        f"[SF Pipeline] Final compose/encode frame {fi + 1}/{total} "
+                        f"({(fi + 1) / total * 100:.1f}%, {fps_now:.2f}fps)"
+                    )
+                    last_report_ts = now_ts
         finally:
             proc.stdin.close()
 
+        logger.info("[SF Pipeline] Waiting for final ffmpeg encoder to finish")
         proc.wait()
         if pbar:
             pbar.update_absolute(90)
