@@ -224,7 +224,67 @@ def init_renderer(
     }
 
 
-def render_frame(renderer: dict, width: int, height: int, frame_idx: int) -> np.ndarray:
+def _audio_reactive_transform(frame: np.ndarray, audio_val: float, preset: str, params: dict) -> np.ndarray:
+    if audio_val <= 0.001 or preset == "none":
+        return frame
+
+    import cv2
+
+    scale = 1.0
+    shift_y = 0.0
+    shift_x = 0.0
+    rotate = 0.0
+    target = params.get("audio_target", "both")
+
+    if preset == "subtle_pulse":
+        scale += audio_val * 0.035
+    elif preset == "heartbeat_zoom":
+        scale += audio_val * 0.12
+        shift_y -= audio_val * frame.shape[0] * 0.015
+    elif preset == "aggressive_bounce":
+        scale += audio_val * 0.10
+        shift_y -= audio_val * frame.shape[0] * 0.05
+    elif preset == "chaotic_shake":
+        frame_pos = float(params.get("_frame_idx", 0.0))
+        scale += audio_val * 0.08
+        shift_x += np.sin(frame_pos * 0.37) * audio_val * frame.shape[1] * 0.025
+        shift_y += np.cos(frame_pos * 0.29) * audio_val * frame.shape[0] * 0.025
+        rotate += audio_val * 0.35
+    elif preset == "custom":
+        if target in ("zoom", "both"):
+            scale += audio_val * 0.10
+        if target in ("height", "both"):
+            shift_y -= audio_val * frame.shape[0] * 0.04
+        if target == "isometric":
+            rotate += audio_val * 0.25
+        if target == "phase":
+            shift_x += audio_val * frame.shape[1] * 0.04
+
+    if abs(scale - 1.0) < 1e-5 and abs(shift_x) < 1e-5 and abs(shift_y) < 1e-5 and abs(rotate) < 1e-5:
+        return frame
+
+    h, w = frame.shape[:2]
+    mat = cv2.getRotationMatrix2D((w * 0.5, h * 0.5), rotate, scale)
+    mat[0, 2] += shift_x
+    mat[1, 2] += shift_y
+    return cv2.warpAffine(
+        frame,
+        mat,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+
+
+def render_frame(
+    renderer: dict,
+    width: int,
+    height: int,
+    frame_idx: int,
+    audio_val: float = 0.0,
+    preset: str = "none",
+    params: dict | None = None,
+) -> np.ndarray:
     import cv2
 
     cap = renderer["cap"]
@@ -242,4 +302,8 @@ def render_frame(renderer: dict, width: int, height: int, frame_idx: int) -> np.
     frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     if frame.shape[1] != width or frame.shape[0] != height:
         frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+    if params is None:
+        params = {}
+    params["_frame_idx"] = frame_idx
+    frame = _audio_reactive_transform(frame, float(audio_val), preset, params)
     return frame.astype(np.uint8, copy=False)

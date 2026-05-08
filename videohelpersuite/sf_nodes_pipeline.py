@@ -602,7 +602,8 @@ class SF_AddEffect:
             logger.warning("[SF Pipeline] No layer to apply effect on")
             return (pipe,)
 
-        # Wrap the last layer with the effect
+        # Keep existing visual/base layers intact. Effects are applied as
+        # post-process layers by _composite_all_layers after all layers blend.
         source_layer = pipe["layers"][-1]
         canvas = pipe["canvas"]
 
@@ -628,8 +629,7 @@ class SF_AddEffect:
         else:
             return (pipe,)
 
-        # Replace last layer with wrapped version
-        pipe["layers"][-1] = fx_layer
+        pipe["layers"].append(fx_layer)
         logger.info(f"[SF Pipeline] Added effect: {effect}")
         return (pipe,)
 
@@ -991,7 +991,7 @@ class SF_AddDepthFlow:
                 "color_grayscale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "color_sepia": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "audio_preset": (["none", "subtle_pulse", "heartbeat_zoom", "aggressive_bounce", "chaotic_shake", "custom"], {
-                    "default": "none",
+                    "default": "subtle_pulse",
                     "tooltip": "音频驱动预设模式",
                 }),
                 "audio_target": (["zoom", "height", "both", "isometric", "phase"], {
@@ -1032,7 +1032,7 @@ class SF_AddDepthFlow:
             blur_exponent=2.0, blur_quality=4, blur_directions=16,
             color_saturation=1.0, color_contrast=1.0, color_brightness=1.0,
             color_gamma=1.0, color_grayscale=0.0, color_sepia=0.0,
-            audio_preset="none", audio_target="both", audio_scale=1.5):
+            audio_preset="subtle_pulse", audio_target="both", audio_scale=1.5):
         pipe = _clone_pipeline(pipeline)
 
         if pipe["background"] is None:

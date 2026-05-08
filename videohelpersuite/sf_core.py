@@ -609,7 +609,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
 
     if renderer_type == "opengl_cli":
         from . import sf_depthflow_cli
-        return sf_depthflow_cli.render_frame(renderer_obj, w, h, frame_idx)
+        return sf_depthflow_cli.render_frame(renderer_obj, w, h, frame_idx, audio_val, preset, params)
     elif renderer_type == "opengl":
         return _render_df_frame_opengl(renderer_obj, w, h, total, frame_idx, params, audio_val, preset)
     elif renderer_type == "cuda" and cuda_mod is not None:
