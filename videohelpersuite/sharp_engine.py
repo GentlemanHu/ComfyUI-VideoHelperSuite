@@ -720,6 +720,21 @@ def _import_gsplat_with_optional_install():
         return gsplat
 
 
+def _pip_show(package: str) -> str:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", package],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+        )
+        output = result.stdout.strip()
+        return output if output else f"pip show {package}: no output"
+    except Exception as exc:
+        return f"pip show {package} failed: {exc}"
+
+
 def requires_official_renderer(render_mode: str) -> bool:
     return str(render_mode or "photo_composite").lower() == "photo_composite"
 
@@ -737,12 +752,14 @@ def ensure_official_renderer_available(render_backend: str = "auto", render_mode
     try:
         _import_gsplat_with_optional_install()
     except Exception as exc:
+        pip_show = _pip_show("gsplat")
         raise RuntimeError(
             "SHARP photo_composite rendering requires the official gsplat renderer, but gsplat is not importable. "
             f"Platform={platform.system()}, Python={sys.executable}. "
             "Install a gsplat build compatible with this Python/PyTorch/CUDA environment, then restart ComfyUI. "
             "If gsplat is not available on this system, use render_mode=source_static, gaussian_color, depth, or alpha. "
-            f"Original import error: {exc}"
+            f"Original import error: {exc}. "
+            f"Current Python pip show gsplat: {pip_show}"
         ) from exc
 
 
