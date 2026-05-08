@@ -14,6 +14,23 @@ if os.environ.get("VHS_DEPTHFLOW_ESTIMATE_DEVICE", "").lower() == "cpu":
     os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 
+def _patch_torch_cpu_accelerator() -> None:
+    if os.environ.get("VHS_DEPTHFLOW_ESTIMATE_DEVICE", "").lower() != "cpu":
+        return
+    try:
+        import torch
+    except Exception:
+        return
+
+    class _CPUAccelerator:
+        type = "cpu"
+
+    try:
+        torch.accelerator.current_accelerator = lambda *args, **kwargs: _CPUAccelerator()
+    except Exception:
+        pass
+
+
 def _setup_paths() -> None:
     root = Path(__file__).resolve().parent.parent
     for base in (
@@ -35,6 +52,7 @@ def _setup_paths() -> None:
 
 def _estimate(img_np: np.ndarray, params: dict[str, Any]) -> np.ndarray:
     _setup_paths()
+    _patch_torch_cpu_accelerator()
     key = str(params.get("estimator") or "da2").lower()
     postprocess = bool(params.get("postprocess", True))
 
