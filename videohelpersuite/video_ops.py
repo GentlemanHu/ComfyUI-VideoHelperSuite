@@ -757,6 +757,17 @@ def _parse_rgba(color: str, default=(0, 0, 0, 0)):
         return default
 
 
+def _save_solid_canvas_image(width: int, height: int, color: str, prefix: str = "movis_background") -> str:
+    w = max(1, int(width))
+    h = max(1, int(height))
+    rgba = _parse_rgba(color, (0, 0, 0, 255))
+    temp_dir = Path(folder_paths.get_temp_directory()) / "vhs_movis_images" / "backgrounds"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    p = temp_dir / f"{prefix}_{w}x{h}_{_now_stamp()}.png"
+    Image.new("RGBA", (w, h), rgba).save(p, compress_level=1)
+    return str(p.resolve())
+
+
 def _normalize_anchor(v: Any, default: float = 0.5) -> float:
     try:
         return max(0.0, min(1.0, float(v)))
@@ -2598,8 +2609,9 @@ def _render_timeline(timeline: dict[str, Any], output_file_prefix: str, notify_a
     render_frame_count = max(1, len(np.arange(0.0, duration, 1.0 / fps)))
     total_steps = 1 + len(timeline.get("video_tracks", [])) + len(timeline.get("audio_tracks", [])) + len(timeline.get("text_tracks", [])) + (1 if timeline.get("bgm") else 0) + render_frame_count + 1
     pbar = ProgressBar(max(1, total_steps))
+    background_path = _save_solid_canvas_image(width, height, bg_color)
     scene.add_layer(
-        mv.layer.Rectangle(size=(width, height), color=bg_color, duration=duration),
+        mv.layer.Image(background_path, duration=duration),
         name="background",
     )
     pbar.update(1)
