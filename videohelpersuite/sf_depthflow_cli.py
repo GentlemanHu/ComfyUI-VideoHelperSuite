@@ -164,6 +164,7 @@ def init_renderer(
     layer: dict,
     src_img: np.ndarray,
     depth_np: np.ndarray | None,
+    audio_depth_np: np.ndarray | None,
     width: int,
     height: int,
     fps: float,
@@ -220,8 +221,27 @@ def init_renderer(
         "cap": cap,
         "path": str(output_path),
         "next_frame": 0,
+        "audio_depth": _prepare_audio_depth(audio_depth_np, width, height),
         "cleanup_paths": [str(input_path), str(depth_path) if depth_path is not None else ""],
     }
+
+
+def _prepare_audio_depth(depth_np: np.ndarray | None, width: int, height: int) -> np.ndarray | None:
+    if depth_np is None:
+        return None
+    import cv2
+
+    depth = np.asarray(depth_np, dtype=np.float32)
+    if depth.shape[:2] != (height, width):
+        depth = cv2.resize(depth, (width, height), interpolation=cv2.INTER_LINEAR)
+    depth = np.nan_to_num(depth, nan=0.0, posinf=1.0, neginf=0.0)
+    d_min = float(depth.min())
+    d_max = float(depth.max())
+    if d_max > d_min:
+        depth = (depth - d_min) / (d_max - d_min)
+    else:
+        depth = np.zeros_like(depth, dtype=np.float32)
+    return cv2.GaussianBlur(depth.astype(np.float32), (0, 0), sigmaX=1.2, sigmaY=1.2)
 
 
 def _audio_reactive_transform(frame: np.ndarray, audio_val: float, preset: str, params: dict) -> np.ndarray:
@@ -229,6 +249,10 @@ def _audio_reactive_transform(frame: np.ndarray, audio_val: float, preset: str, 
         return frame
 
     import cv2
+
+    depth = params.get("_audio_depth")
+    if depth is not None and bool(params.get("audio_depth_reactive", True)):
+        return _audio_depth_warp(frame, depth, audio_val, preset, params)
 
     scale = 1.0
     shift_y = 0.0
@@ -276,6 +300,74 @@ def _audio_reactive_transform(frame: np.ndarray, audio_val: float, preset: str, 
     )
 
 
+def _audio_depth_warp(frame: np.ndarray, depth: np.ndarray, audio_val: float, preset: str, params: dict) -> np.ndarray:
+    import cv2
+
+    h, w = frame.shape[:2]
+    if depth.shape[:2] != (h, w):
+        depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    strength = float(params.get("audio_depth_strength", 1.0))
+    target = params.get("audio_target", "both")
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx = (w - 1) * 0.5
+    cy = (h - 1) * 0.5
+    max_dim = float(max(w, h))
+
+    z = np.clip(depth.astype(np.float32), 0.0, 1.0)
+    z = (z - float(z.mean())) * 2.0
+    radial_x = (xx - cx) / max_dim
+    radial_y = (yy - cy) / max_dim
+
+    zoom_amt = 0.0
+    height_amt = 0.0
+    dolly_amt = 0.0
+    phase_amt = 0.0
+    frame_pos = float(params.get("_frame_idx", 0.0))
+
+    if preset == "subtle_pulse":
+        zoom_amt = audio_val * 28.0 * strength
+        height_amt = audio_val * 8.0 * strength
+    elif preset == "heartbeat_zoom":
+        zoom_amt = audio_val * 70.0 * strength
+        dolly_amt = audio_val * 28.0 * strength
+    elif preset == "aggressive_bounce":
+        zoom_amt = audio_val * 95.0 * strength
+        height_amt = audio_val * 45.0 * strength
+        dolly_amt = audio_val * 40.0 * strength
+    elif preset == "chaotic_shake":
+        zoom_amt = audio_val * 55.0 * strength
+        phase_amt = audio_val * 35.0 * strength
+        height_amt = np.cos(frame_pos * 0.31) * audio_val * 28.0 * strength
+    elif preset == "custom":
+        if target in ("zoom", "both"):
+            zoom_amt = audio_val * 75.0 * strength
+        if target in ("height", "both"):
+            height_amt = audio_val * 45.0 * strength
+        if target == "isometric":
+            dolly_amt = audio_val * 55.0 * strength
+        if target == "phase":
+            phase_amt = audio_val * 45.0 * strength
+
+    dx = radial_x * z * zoom_amt
+    dy = radial_y * z * zoom_amt
+    dy -= z * height_amt
+    dx += z * dolly_amt * 0.35
+    if phase_amt:
+        dx += np.sin(frame_pos * 0.17 + z * 2.5) * phase_amt * z
+        dy += np.cos(frame_pos * 0.13 + z * 2.0) * phase_amt * z * 0.5
+
+    map_x = (xx - dx).astype(np.float32)
+    map_y = (yy - dy).astype(np.float32)
+    return cv2.remap(
+        frame,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+
+
 def render_frame(
     renderer: dict,
     width: int,
@@ -305,5 +397,6 @@ def render_frame(
     if params is None:
         params = {}
     params["_frame_idx"] = frame_idx
+    params["_audio_depth"] = renderer.get("audio_depth")
     frame = _audio_reactive_transform(frame, float(audio_val), preset, params)
     return frame.astype(np.uint8, copy=False)

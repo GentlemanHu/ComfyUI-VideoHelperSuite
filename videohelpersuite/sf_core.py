@@ -102,6 +102,11 @@ def _render_bars_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int) ->
     mirror = params.get("mirror", True)
     glow = params.get("glow", True)
     bg_color = tuple(params.get("bg_color", (10, 10, 25)))
+    gain = float(params.get("intensity", 1.0))
+    height_ratio = float(params.get("height_ratio", 0.40))
+    area_ratio = float(params.get("area_width", 0.90))
+    y_position = float(params.get("position_y", 0.50))
+    response_gamma = max(0.1, float(params.get("response_gamma", 1.0)))
 
     colors = params.get("colors", [
         (0, 255, 220), (120, 80, 255), (255, 50, 180), (255, 160, 40),
@@ -118,16 +123,17 @@ def _render_bars_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int) ->
     if bins == 0:
         return frame
 
-    bar_area_w = int(w * 0.9)
+    bar_area_w = int(w * np.clip(area_ratio, 0.05, 1.0))
     bar_area_x = (w - bar_area_w) // 2
     bar_w = max(1, bar_area_w // bins)
     gap = max(0, (bar_area_w - bar_w * bins) // max(1, bins - 1))
     actual_bar_w = max(1, bar_w - 1)
-    max_bar_h = int(h * 0.40)
-    center_y = h // 2
+    max_bar_h = int(h * np.clip(height_ratio, 0.01, 1.0))
+    center_y = int(h * np.clip(y_position, 0.0, 1.0))
 
     for i in range(bins):
-        val = float(np.clip(spec[i], 0, 1))
+        val = float(np.clip(spec[i] * gain, 0, 1))
+        val = val ** response_gamma
         bh = int(val * max_bar_h)
         if bh < 1:
             continue
@@ -162,6 +168,13 @@ def _render_radial_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int) 
     spec = _get_spectrum_frame(layer, frame_idx)
     params = layer.get("params", {})
     bg_color = tuple(params.get("bg_color", (10, 10, 25)))
+    gain = float(params.get("intensity", 1.0))
+    radius_scale = float(params.get("size", 1.0))
+    inner_ratio = float(params.get("radial_inner", 0.20))
+    outer_ratio = float(params.get("radial_outer", 0.70))
+    line_width = int(params.get("thickness", 2))
+    pos_x = float(params.get("position_x", 0.50))
+    pos_y = float(params.get("position_y", 0.50))
     colors = params.get("colors", [
         (0, 255, 220), (120, 80, 255), (255, 50, 180), (255, 160, 40),
     ])
@@ -180,20 +193,21 @@ def _render_radial_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int) 
     except ImportError:
         return frame
 
-    cx, cy = w // 2, h // 2
-    r_inner = min(cx, cy) * 0.2
-    r_max = min(cx, cy) * 0.7
+    cx, cy = int(w * np.clip(pos_x, 0.0, 1.0)), int(h * np.clip(pos_y, 0.0, 1.0))
+    base_r = min(w, h) * 0.5 * max(0.05, radius_scale)
+    r_inner = base_r * np.clip(inner_ratio, 0.0, 1.0)
+    r_max = base_r * np.clip(outer_ratio, 0.01, 2.0)
 
     for i in range(bins):
         angle = 2.0 * math.pi * i / bins - math.pi / 2
-        val = float(np.clip(spec[i], 0, 1))
+        val = float(np.clip(spec[i] * gain, 0, 1))
         r_outer = r_inner + val * (r_max - r_inner)
         x1 = int(cx + r_inner * math.cos(angle))
         y1 = int(cy + r_inner * math.sin(angle))
         x2 = int(cx + r_outer * math.cos(angle))
         y2 = int(cy + r_outer * math.sin(angle))
         color = _gradient_color(i / max(1, bins - 1), colors)
-        cv2.line(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+        cv2.line(frame, (x1, y1), (x2, y2), color, max(1, line_width), cv2.LINE_AA)
 
     blurred = cv2.GaussianBlur(frame, (0, 0), sigmaX=12)
     frame = np.clip(
@@ -211,6 +225,10 @@ def _render_waveform_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int
     params = layer.get("params", {})
     bg_color = tuple(params.get("bg_color", (10, 10, 25)))
     line_color = tuple(params.get("line_color", (0, 255, 180)))
+    gain = float(params.get("intensity", 1.0))
+    amp_ratio = float(params.get("height_ratio", 0.35))
+    line_width = int(params.get("thickness", 2))
+    y_position = float(params.get("position_y", 0.50))
     audio = layer.get("audio")
 
     bg_img = layer.get("background_frame")
@@ -239,8 +257,8 @@ def _render_waveform_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int
     if len(chunk) == 0:
         return frame
 
-    center_y = h // 2
-    amp = h * 0.35
+    center_y = int(h * np.clip(y_position, 0.0, 1.0))
+    amp = h * np.clip(amp_ratio, 0.01, 1.0) * gain
     n_points = min(len(chunk), w)
     indices = np.linspace(0, len(chunk) - 1, n_points).astype(int)
     sampled = chunk[indices]
@@ -251,7 +269,7 @@ def _render_waveform_frame(layer: Dict, frame_idx: int, t: float, w: int, h: int
         py = int(np.clip(center_y - sampled[i] * amp, 0, h - 1))
         points[i, 0] = [px, py]
 
-    cv2.polylines(frame, [points], False, line_color, 2, cv2.LINE_AA)
+    cv2.polylines(frame, [points], False, line_color, max(1, line_width), cv2.LINE_AA)
     blurred = cv2.GaussianBlur(frame, (0, 0), sigmaX=8)
     frame = np.clip(
         frame.astype(np.float32) + blurred.astype(np.float32) * 0.5,
@@ -461,6 +479,47 @@ def _estimate_depth_simple(img_np, estimator: str = "da2", params: dict | None =
     )
 
 
+def _estimate_audio_reactive_depth(img_np: np.ndarray, params: dict) -> np.ndarray | None:
+    if not bool(params.get("audio_depth_reactive", True)):
+        return None
+
+    old_device = None
+    try:
+        import os
+        old_device = os.environ.get("VHS_DEPTHFLOW_ESTIMATE_DEVICE")
+        os.environ["VHS_DEPTHFLOW_ESTIMATE_DEVICE"] = "cpu"
+        depth = _estimate_depth_simple(img_np, params.get("depth_estimator", "da2"), params)
+        return prepare_depth_map(
+            depth,
+            img_np,
+            normalize_mode=params.get("depth_normalize", "auto"),
+            invert_depth=params.get("input_depth_invert", 0.0),
+            smooth_sigma=max(float(params.get("depth_smooth_sigma", 0.0)), 0.6),
+        )
+    except Exception as exc:
+        logger.warning(f"[SF] DepthFlow audio depth estimate failed, using luminance depth for reactivity only: {exc}")
+        try:
+            import cv2
+            gray = cv2.cvtColor(np.asarray(img_np, dtype=np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+            gray = cv2.GaussianBlur(gray, (0, 0), sigmaX=2.0, sigmaY=2.0)
+            return prepare_depth_map(gray, img_np, normalize_mode="minmax")
+        except Exception:
+            return None
+    finally:
+        if old_device is None:
+            try:
+                import os
+                os.environ.pop("VHS_DEPTHFLOW_ESTIMATE_DEVICE", None)
+            except Exception:
+                pass
+        else:
+            try:
+                import os
+                os.environ["VHS_DEPTHFLOW_ESTIMATE_DEVICE"] = old_device
+            except Exception:
+                pass
+
+
 def _depthflow_quality_settings(params: dict) -> dict:
     """Resolve DepthFlow render quality knobs from a small profile plus overrides."""
     profile = params.get("quality_profile", "film")
@@ -558,10 +617,16 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             if backend_name == "opengl" and renderer is None:
                 try:
                     from . import sf_depthflow_cli
+                    audio_depth_np = None
+                    if params.get("audio_preset", "none") != "none":
+                        audio_depth_np = depth_np
+                        if audio_depth_np is None:
+                            audio_depth_np = _estimate_audio_reactive_depth(src_img, params)
                     renderer = ("opengl_cli", sf_depthflow_cli.init_renderer(
                         layer,
                         src_img,
                         depth_np,
+                        audio_depth_np,
                         w,
                         h,
                         fps,

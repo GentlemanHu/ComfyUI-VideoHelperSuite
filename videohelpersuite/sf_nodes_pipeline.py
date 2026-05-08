@@ -139,11 +139,20 @@ def _composite_all_layers(layers, frame_idx, canvas, w, h):
             if base_frame is None:
                 base_frame = rendered
             else:
-                # Additive blend: bright visualizer pixels glow on top of base
+                vparams = layer.get("params", {})
+                opacity = float(np.clip(vparams.get("opacity", 1.0), 0.0, 1.0))
+                blend_mode = vparams.get("blend_mode", "additive")
                 base_f = base_frame.astype(np.float32)
-                over_f = rendered.astype(np.float32)
-                # Full additive strength — visualizer elements are already isolated
-                base_frame = np.clip(base_f + over_f, 0, 255).astype(np.uint8)
+                over_f = rendered.astype(np.float32) * opacity
+                if blend_mode == "screen":
+                    base_norm = base_f / 255.0
+                    over_norm = over_f / 255.0
+                    base_frame = np.clip((1.0 - (1.0 - base_norm) * (1.0 - over_norm)) * 255.0, 0, 255).astype(np.uint8)
+                elif blend_mode == "normal":
+                    mask = np.clip(over_f.max(axis=2, keepdims=True) / 255.0, 0.0, 1.0)
+                    base_frame = np.clip(base_f * (1.0 - mask) + over_f * mask, 0, 255).astype(np.uint8)
+                else:
+                    base_frame = np.clip(base_f + over_f, 0, 255).astype(np.uint8)
         else:
             rendered = render_layer_frame(layer, frame_idx, canvas)
             if rendered.shape[0] != h or rendered.shape[1] != w:
@@ -355,6 +364,12 @@ class SF_AddSpectrum:
                 "smooth_zeta": ("FLOAT", {
                     "default": 0.7, "min": 0.01, "max": 3.0, "step": 0.05,
                 }),
+                "gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "floor": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "gamma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 4.0, "step": 0.05}),
+                "bass_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "mid_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "treble_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
             },
         }
 
@@ -364,7 +379,9 @@ class SF_AddSpectrum:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow Pipeline"
 
     def compute(self, pipeline, fft_power, spectrum_bins,
-                min_freq, max_freq, smooth_freq, smooth_zeta):
+                min_freq, max_freq, smooth_freq, smooth_zeta,
+                gain=1.0, floor=0.0, gamma=1.0,
+                bass_gain=1.0, mid_gain=1.0, treble_gain=1.0):
         pipe = _clone_pipeline(pipeline)
 
         if pipe["audio"] is None:
@@ -383,6 +400,19 @@ class SF_AddSpectrum:
             bins=spectrum_bins, min_freq=min_freq, max_freq=max_freq,
             progress_cb=pcb,
         )
+
+        bins_data = spectrum["bins"]
+        n_bins = bins_data.shape[1] if bins_data.ndim == 2 else spectrum_bins
+        band_gain = np.ones(n_bins, dtype=np.float32)
+        bass_end = max(1, int(n_bins * 0.22))
+        mid_end = max(bass_end + 1, int(n_bins * 0.62))
+        band_gain[:bass_end] *= float(bass_gain)
+        band_gain[bass_end:mid_end] *= float(mid_gain)
+        band_gain[mid_end:] *= float(treble_gain)
+        shaped = np.maximum(bins_data - float(floor), 0.0) * float(gain)
+        shaped *= band_gain.reshape(1, -1)
+        shaped = np.clip(shaped, 0.0, 1.0) ** max(0.1, float(gamma))
+        spectrum["bins"] = shaped
 
         # Apply smoothing if requested
         if smooth_freq > 0:
@@ -469,6 +499,18 @@ class SF_AddVisualizer:
                 }),
             },
             "optional": {
+                "opacity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
+                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
+                "size": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 3.0, "step": 0.05}),
+                "position_x": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "position_y": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "height_ratio": ("FLOAT", {"default": 0.40, "min": 0.01, "max": 1.0, "step": 0.01}),
+                "area_width": ("FLOAT", {"default": 0.90, "min": 0.05, "max": 1.0, "step": 0.01}),
+                "thickness": ("INT", {"default": 2, "min": 1, "max": 32}),
+                "response_gamma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 4.0, "step": 0.05}),
+                "radial_inner": ("FLOAT", {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "radial_outer": ("FLOAT", {"default": 0.70, "min": 0.01, "max": 2.0, "step": 0.01}),
+                "blend_mode": (["additive", "screen", "normal"], {"default": "additive"}),
                 "roll_window": ("FLOAT", {
                     "default": 3.0, "min": 0.5, "max": 30.0,
                     "tooltip": "钢琴卷帘可见时间窗口（秒）",
@@ -482,9 +524,27 @@ class SF_AddVisualizer:
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢/ShaderFlow Pipeline"
 
     def add(self, pipeline, vis_type, color_theme, mirror, glow,
-            use_background, roll_window=3.0):
+            use_background, opacity=1.0, intensity=1.0, size=1.0,
+            position_x=0.5, position_y=0.5, height_ratio=0.40,
+            area_width=0.90, thickness=2, response_gamma=1.0,
+            radial_inner=0.20, radial_outer=0.70,
+            blend_mode="additive", roll_window=3.0):
         pipe = _clone_pipeline(pipeline)
         colors = self.COLOR_THEMES.get(color_theme, self.COLOR_THEMES["neon"])
+        common_params = {
+            "opacity": opacity,
+            "intensity": intensity,
+            "size": size,
+            "position_x": position_x,
+            "position_y": position_y,
+            "height_ratio": height_ratio,
+            "area_width": area_width,
+            "thickness": thickness,
+            "response_gamma": response_gamma,
+            "radial_inner": radial_inner,
+            "radial_outer": radial_outer,
+            "blend_mode": blend_mode,
+        }
 
         # Build background frame getter from pipeline
         bg_getter = None
@@ -510,7 +570,8 @@ class SF_AddVisualizer:
                 "type": "bars",
                 "spectrum": pipe["spectrum"],
                 "params": {"mirror": mirror, "glow": glow,
-                           "colors": colors, "bg_color": (10, 10, 25)},
+                           "colors": colors, "bg_color": (10, 10, 25),
+                           **common_params},
                 "background_frame": bg_getter,
             }
 
@@ -520,7 +581,8 @@ class SF_AddVisualizer:
             layer = {
                 "type": "radial",
                 "spectrum": pipe["spectrum"],
-                "params": {"colors": colors, "bg_color": (10, 10, 25)},
+                "params": {"colors": colors, "bg_color": (10, 10, 25),
+                           **common_params},
                 "background_frame": bg_getter,
             }
 
@@ -532,7 +594,8 @@ class SF_AddVisualizer:
                 "audio": pipe["audio"],
                 "fps": pipe["canvas"]["fps"],
                 "params": {"line_color": colors[0] if colors else (0, 255, 180),
-                           "bg_color": (10, 10, 25)},
+                           "bg_color": (10, 10, 25),
+                           **common_params},
                 "background_frame": bg_getter,
             }
 
@@ -544,7 +607,8 @@ class SF_AddVisualizer:
                 "midi": pipe["midi"],
                 "params": {"roll_window": roll_window,
                            "piano_height": 0.15,
-                           "smooth_keys": True},
+                           "smooth_keys": True,
+                           **common_params},
                 "_key_dynamics_cache": None,
             }
         else:
@@ -1002,6 +1066,14 @@ class SF_AddDepthFlow:
                     "default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1,
                     "tooltip": "音频驱动强度缩放",
                 }),
+                "audio_depth_reactive": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "CLI/OpenGL路径下使用深度图做音频视差响应，而不是整图缩放",
+                }),
+                "audio_depth_strength": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
+                    "tooltip": "深度音频响应强度",
+                }),
             },
         }
 
@@ -1032,7 +1104,8 @@ class SF_AddDepthFlow:
             blur_exponent=2.0, blur_quality=4, blur_directions=16,
             color_saturation=1.0, color_contrast=1.0, color_brightness=1.0,
             color_gamma=1.0, color_grayscale=0.0, color_sepia=0.0,
-            audio_preset="subtle_pulse", audio_target="both", audio_scale=1.5):
+            audio_preset="subtle_pulse", audio_target="both", audio_scale=1.5,
+            audio_depth_reactive=True, audio_depth_strength=1.0):
         pipe = _clone_pipeline(pipeline)
 
         if pipe["background"] is None:
@@ -1113,6 +1186,8 @@ class SF_AddDepthFlow:
                 "audio_preset": audio_preset,
                 "audio_target": audio_target,
                 "audio_scale": audio_scale,
+                "audio_depth_reactive": audio_depth_reactive,
+                "audio_depth_strength": audio_depth_strength,
             },
             "_src_img": src_img,
             "_depth_np": depth_np,
