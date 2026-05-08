@@ -221,12 +221,12 @@ def init_renderer(
         "cap": cap,
         "path": str(output_path),
         "next_frame": 0,
-        "audio_depth": _prepare_audio_depth(audio_depth_np, width, height),
+        "audio_depth": _prepare_audio_depth(audio_depth_np, width, height, params),
         "cleanup_paths": [str(input_path), str(depth_path) if depth_path is not None else ""],
     }
 
 
-def _prepare_audio_depth(depth_np: np.ndarray | None, width: int, height: int) -> np.ndarray | None:
+def _prepare_audio_depth(depth_np: np.ndarray | None, width: int, height: int, params: dict) -> np.ndarray | None:
     if depth_np is None:
         return None
     import cv2
@@ -241,7 +241,10 @@ def _prepare_audio_depth(depth_np: np.ndarray | None, width: int, height: int) -
         depth = (depth - d_min) / (d_max - d_min)
     else:
         depth = np.zeros_like(depth, dtype=np.float32)
-    return cv2.GaussianBlur(depth.astype(np.float32), (0, 0), sigmaX=1.2, sigmaY=1.2)
+    sigma = max(0.0, float(params.get("audio_depth_smooth", 1.2)))
+    if sigma > 0:
+        depth = cv2.GaussianBlur(depth.astype(np.float32), (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return depth.astype(np.float32, copy=False)
 
 
 def _audio_reactive_transform(frame: np.ndarray, audio_val: float, preset: str, params: dict) -> np.ndarray:
@@ -308,14 +311,41 @@ def _audio_depth_warp(frame: np.ndarray, depth: np.ndarray, audio_val: float, pr
         depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_LINEAR)
 
     strength = float(params.get("audio_depth_strength", 1.0))
+    max_px = max(0.0, float(params.get("audio_depth_max_px", 18.0)))
+    if strength <= 0.0 or max_px <= 0.0:
+        return frame
+
     target = params.get("audio_target", "both")
+    mode = str(params.get("audio_depth_mode", "background_only"))
+    near_weight = float(params.get("audio_depth_near_weight", 0.15))
+    far_weight = float(params.get("audio_depth_far_weight", 1.0))
+    near_protect = float(params.get("audio_depth_near_protect", 0.65))
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    cx = (w - 1) * 0.5
-    cy = (h - 1) * 0.5
+    cx = (w - 1) * float(params.get("audio_depth_center_x", 0.5))
+    cy = (h - 1) * float(params.get("audio_depth_center_y", 0.5))
     max_dim = float(max(w, h))
 
-    z = np.clip(depth.astype(np.float32), 0.0, 1.0)
-    z = (z - float(z.mean())) * 2.0
+    z01 = np.clip(depth.astype(np.float32), 0.0, 1.0)
+    central = z01[h // 4:max(h // 4 + 1, h * 3 // 4), w // 4:max(w // 4 + 1, w * 3 // 4)]
+    center_median = float(np.median(central)) if central.size else float(np.median(z01))
+    global_median = float(np.median(z01))
+    near_raw = z01 if center_median >= global_median else (1.0 - z01)
+    near_raw = np.clip(near_raw, 0.0, 1.0)
+    start = max(0.0, min(0.98, near_protect - 0.25))
+    end = max(start + 0.01, min(1.0, near_protect))
+    near_score = np.clip((near_raw - start) / (end - start), 0.0, 1.0)
+    near_score = near_score * near_score * (3.0 - 2.0 * near_score)
+
+    if mode == "full_scene":
+        influence = np.ones_like(z01, dtype=np.float32)
+    elif mode == "foreground_only":
+        influence = near_score * max(0.0, near_weight)
+    elif mode == "balanced":
+        influence = near_score * max(0.0, near_weight) + (1.0 - near_score) * max(0.0, far_weight)
+    else:
+        influence = (1.0 - near_score) * max(0.0, far_weight) + near_score * max(0.0, near_weight)
+
+    z = (z01 - float(z01.mean())) * 2.0 * influence
     radial_x = (xx - cx) / max_dim
     radial_y = (yy - cy) / max_dim
 
@@ -356,6 +386,10 @@ def _audio_depth_warp(frame: np.ndarray, depth: np.ndarray, audio_val: float, pr
     if phase_amt:
         dx += np.sin(frame_pos * 0.17 + z * 2.5) * phase_amt * z
         dy += np.cos(frame_pos * 0.13 + z * 2.0) * phase_amt * z * 0.5
+
+    mag = np.maximum(1.0, np.sqrt(dx * dx + dy * dy) / max_px)
+    dx = dx / mag
+    dy = dy / mag
 
     map_x = (xx - dx).astype(np.float32)
     map_y = (yy - dy).astype(np.float32)

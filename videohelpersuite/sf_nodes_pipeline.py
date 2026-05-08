@@ -1092,8 +1092,40 @@ class SF_AddDepthFlow:
                     "tooltip": "CLI/OpenGL路径下使用深度图做音频视差响应，而不是整图缩放",
                 }),
                 "audio_depth_strength": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
+                    "default": 0.45, "min": 0.0, "max": 5.0, "step": 0.05,
                     "tooltip": "深度音频响应强度",
+                }),
+                "audio_depth_mode": (["background_only", "balanced", "full_scene", "foreground_only"], {
+                    "default": "background_only",
+                    "tooltip": "background_only默认保护人物/近景；full_scene会让主体也变形",
+                }),
+                "audio_depth_max_px": ("FLOAT", {
+                    "default": 14.0, "min": 0.0, "max": 160.0, "step": 1.0,
+                    "tooltip": "每帧音频深度位移的像素上限；越大越夸张也越容易变形",
+                }),
+                "audio_depth_near_protect": ("FLOAT", {
+                    "default": 0.65, "min": 0.05, "max": 0.98, "step": 0.01,
+                    "tooltip": "近景保护阈值；越低保护范围越大",
+                }),
+                "audio_depth_near_weight": ("FLOAT", {
+                    "default": 0.08, "min": 0.0, "max": 2.0, "step": 0.01,
+                    "tooltip": "近景/人物参与音频视差的比例；0最稳",
+                }),
+                "audio_depth_far_weight": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05,
+                    "tooltip": "远景/背景参与音频视差的比例",
+                }),
+                "audio_depth_smooth": ("FLOAT", {
+                    "default": 1.6, "min": 0.0, "max": 8.0, "step": 0.1,
+                    "tooltip": "音频响应深度图平滑；越大越自然，细节变形越少",
+                }),
+                "audio_depth_center_x": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "音频深度视差中心X，0左1右",
+                }),
+                "audio_depth_center_y": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "音频深度视差中心Y，0上1下",
                 }),
             },
         }
@@ -1126,7 +1158,11 @@ class SF_AddDepthFlow:
             color_saturation=1.0, color_contrast=1.0, color_brightness=1.0,
             color_gamma=1.0, color_grayscale=0.0, color_sepia=0.0,
             audio_preset="subtle_pulse", audio_target="both", audio_scale=1.5,
-            audio_depth_reactive=True, audio_depth_strength=1.0):
+            audio_depth_reactive=True, audio_depth_strength=0.45,
+            audio_depth_mode="background_only", audio_depth_max_px=14.0,
+            audio_depth_near_protect=0.65, audio_depth_near_weight=0.08,
+            audio_depth_far_weight=1.0, audio_depth_smooth=1.6,
+            audio_depth_center_x=0.5, audio_depth_center_y=0.5):
         pipe = _clone_pipeline(pipeline)
 
         if pipe["background"] is None:
@@ -1209,6 +1245,14 @@ class SF_AddDepthFlow:
                 "audio_scale": audio_scale,
                 "audio_depth_reactive": audio_depth_reactive,
                 "audio_depth_strength": audio_depth_strength,
+                "audio_depth_mode": audio_depth_mode,
+                "audio_depth_max_px": audio_depth_max_px,
+                "audio_depth_near_protect": audio_depth_near_protect,
+                "audio_depth_near_weight": audio_depth_near_weight,
+                "audio_depth_far_weight": audio_depth_far_weight,
+                "audio_depth_smooth": audio_depth_smooth,
+                "audio_depth_center_x": audio_depth_center_x,
+                "audio_depth_center_y": audio_depth_center_y,
             },
             "_src_img": src_img,
             "_depth_np": depth_np,
