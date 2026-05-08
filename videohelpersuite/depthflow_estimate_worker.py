@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+
+if os.environ.get("VHS_DEPTHFLOW_ESTIMATE_DEVICE", "").lower() == "cpu":
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 
 def _setup_paths() -> None:

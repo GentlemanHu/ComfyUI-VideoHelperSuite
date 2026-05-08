@@ -139,11 +139,44 @@ def _estimate_depth_subprocess(
             "thicken": thicken,
         }), encoding="utf-8")
 
-        env = os.environ.copy()
-        env.setdefault("PYOPENGL_PLATFORM", "egl")
-        env.setdefault("QT_QPA_PLATFORM", "offscreen")
         cmd = [str(py), str(worker), str(input_path), str(output_path), str(params_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+        def run_worker(label: str, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+            if output_path.exists():
+                output_path.unlink()
+            env = os.environ.copy()
+            env.setdefault("PYOPENGL_PLATFORM", "egl")
+            env.setdefault("QT_QPA_PLATFORM", "offscreen")
+            env["VHS_DEPTHFLOW_ESTIMATE_DEVICE"] = label
+            if env_overrides:
+                env.update(env_overrides)
+            return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+        device_mode = os.environ.get("VHS_DEPTHFLOW_ESTIMATE_DEVICE", "auto").strip().lower()
+        cpu_env = {
+            "CUDA_VISIBLE_DEVICES": "",
+            "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+        }
+
+        if device_mode == "cpu":
+            result = run_worker("cpu", cpu_env)
+        else:
+            result = run_worker("cuda")
+            if result.returncode != 0 and device_mode in {"auto", ""}:
+                detail_probe = "\n".join(x for x in [result.stdout.strip(), result.stderr.strip()] if x)
+                cuda_busy = any(
+                    needle in detail_probe
+                    for needle in (
+                        "CUDA-capable device(s) is/are busy or unavailable",
+                        "CUDA out of memory",
+                        "CUDA error",
+                        "cudaGetDeviceCount",
+                    )
+                )
+                if cuda_busy:
+                    logger.info("DepthFlow CUDA estimator failed; retrying depth estimation on CPU")
+                    result = run_worker("cpu", cpu_env)
+
         if result.returncode != 0:
             detail = "\n".join(x for x in [result.stdout.strip(), result.stderr.strip()] if x)
             raise RuntimeError(
