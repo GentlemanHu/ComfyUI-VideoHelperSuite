@@ -74,10 +74,12 @@ def _isolate_depthflow_import_path() -> list[Path]:
         )
     ]
 
-    for name in ("attr", "attrs"):
+    for name in list(sys.modules):
+        if not (name == "attr" or name == "attrs" or name.startswith("attr.") or name.startswith("attrs.")):
+            continue
         mod = sys.modules.get(name)
         mod_file = str(getattr(mod, "__file__", "") or "")
-        if mod is not None and not any(str(site) in mod_file for site in site_dirs):
+        if mod is None or not any(str(site) in mod_file for site in site_dirs):
             del sys.modules[name]
     return added
 
