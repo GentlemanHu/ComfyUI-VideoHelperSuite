@@ -1,4 +1,5 @@
 import gc
+import os
 
 import torch
 
@@ -20,6 +21,8 @@ class MemoryCleanupPassthrough:
                 "unload_models": ("BOOLEAN", {"default": True}),
                 "free_cuda_cache": ("BOOLEAN", {"default": True}),
                 "gc_collect": ("BOOLEAN", {"default": True}),
+                "cleanup_models_gc": ("BOOLEAN", {"default": True}),
+                "trim_allocator": ("BOOLEAN", {"default": True}),
                 "log_memory": ("BOOLEAN", {"default": True}),
             },
         }
@@ -67,7 +70,28 @@ class MemoryCleanupPassthrough:
             pass
         return " | ".join(parts) if parts else "memory snapshot unavailable"
 
-    def cleanup(self, value, unload_models=True, free_cuda_cache=True, gc_collect=True, log_memory=True):
+    def _trim_allocator(self):
+        if os.name != "posix":
+            return
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            if hasattr(libc, "malloc_trim"):
+                libc.malloc_trim(0)
+        except Exception as exc:
+            logger.warn(f"[VHS Memory Cleanup] malloc_trim failed: {exc}")
+
+    def cleanup(
+        self,
+        value,
+        unload_models=True,
+        free_cuda_cache=True,
+        gc_collect=True,
+        cleanup_models_gc=True,
+        trim_allocator=True,
+        log_memory=True,
+    ):
         before = self._memory_snapshot()
         if unload_models:
             try:
@@ -76,15 +100,24 @@ class MemoryCleanupPassthrough:
                 comfy.model_management.unload_all_models()
             except Exception as exc:
                 logger.warn(f"[VHS Memory Cleanup] unload_all_models failed: {exc}")
+        if cleanup_models_gc:
+            try:
+                import comfy.model_management
+
+                comfy.model_management.cleanup_models_gc()
+            except Exception as exc:
+                logger.warn(f"[VHS Memory Cleanup] cleanup_models_gc failed: {exc}")
         if gc_collect:
             gc.collect()
+        if trim_allocator:
+            self._trim_allocator()
         if free_cuda_cache and torch.cuda.is_available():
             try:
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
             except Exception as exc:
                 logger.warn(f"[VHS Memory Cleanup] cuda cache cleanup failed: {exc}")
-        if unload_models or free_cuda_cache:
+        if unload_models or free_cuda_cache or cleanup_models_gc:
             try:
                 import comfy.model_management
 
