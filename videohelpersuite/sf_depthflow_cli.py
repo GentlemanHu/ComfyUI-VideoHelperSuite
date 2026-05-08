@@ -192,6 +192,8 @@ def init_renderer(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=_build_depthflow_env(),
     )
     tail: list[str] = []
