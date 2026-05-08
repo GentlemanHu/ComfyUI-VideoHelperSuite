@@ -8,8 +8,12 @@ not need to duplicate renderer details.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +38,53 @@ def _own_root() -> Path:
     return _node_root().parents[2]
 
 
+def _venv_python() -> Path | None:
+    venv = _node_root() / ".venv_depthflow"
+    candidates = [
+        venv / "bin" / "python",
+        venv / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _isolate_depthflow_import_path() -> list[Path]:
+    """Prioritize the DepthFlow venv and avoid stale attr/attrs from host Python."""
+    venv = _node_root() / ".venv_depthflow"
+    site_dirs = []
+    if venv.is_dir():
+        site_dirs.extend(venv.glob("lib/python*/site-packages"))
+        site_dirs.extend(venv.glob("Lib/site-packages"))
+
+    added: list[Path] = []
+    for site_dir in reversed([p for p in site_dirs if p.is_dir()]):
+        site_str = str(site_dir)
+        sys.path[:] = [p for p in sys.path if p != site_str]
+        sys.path.insert(0, site_str)
+        added.append(site_dir)
+
+    sys.path[:] = [
+        p for p in sys.path
+        if not (
+            ("python3.10" in p or "Python310" in p or "python310" in p)
+            and ("site-packages" in p or "dist-packages" in p)
+            and str(_node_root()) not in p
+        )
+    ]
+
+    for name in ("attr", "attrs"):
+        mod = sys.modules.get(name)
+        mod_file = str(getattr(mod, "__file__", "") or "")
+        if mod is not None and not any(str(site) in mod_file for site in site_dirs):
+            del sys.modules[name]
+    return added
+
+
 def setup_depthflow_paths() -> list[Path]:
     """Add local DepthFlow install/source paths to sys.path."""
+    added = _isolate_depthflow_import_path()
     candidates = [
         _node_root() / ".venv_depthflow",
         _own_root() / "DepthFlow",
@@ -43,7 +92,6 @@ def setup_depthflow_paths() -> list[Path]:
         Path("/Volumes/GodLin/Dev/Codes/ComfyUI/own/DepthFlow"),
         Path("/Volumes/GodLin/Dev/Codes/ComfyUI/own/ShaderFlow"),
     ]
-    added: list[Path] = []
     for base in candidates:
         if not base.exists():
             continue
@@ -56,6 +104,53 @@ def setup_depthflow_paths() -> list[Path]:
                 sys.path.insert(0, str(p))
                 added.append(p)
     return added
+
+
+def _estimate_depth_subprocess(
+    img_np: np.ndarray,
+    estimator: str,
+    *,
+    model_size: str,
+    da3_resolution: int,
+    postprocess: bool,
+    sigma: float | None,
+    thicken: int | None,
+) -> np.ndarray | None:
+    py = _venv_python()
+    if py is None:
+        return None
+
+    worker = Path(__file__).resolve().parent / "depthflow_estimate_worker.py"
+    if not worker.is_file():
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="vhs_depthflow_est_") as tmp:
+        tmp_dir = Path(tmp)
+        input_path = tmp_dir / "input.npy"
+        output_path = tmp_dir / "depth.npy"
+        params_path = tmp_dir / "params.json"
+        np.save(input_path, np.asarray(img_np, dtype=np.uint8))
+        params_path.write_text(json.dumps({
+            "estimator": estimator,
+            "model_size": model_size,
+            "da3_resolution": int(da3_resolution),
+            "postprocess": bool(postprocess),
+            "sigma": sigma,
+            "thicken": thicken,
+        }), encoding="utf-8")
+
+        env = os.environ.copy()
+        env.setdefault("PYOPENGL_PLATFORM", "egl")
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cmd = [str(py), str(worker), str(input_path), str(output_path), str(params_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if result.returncode != 0:
+            detail = "\n".join(x for x in [result.stdout.strip(), result.stderr.strip()] if x)
+            raise RuntimeError(
+                "DepthFlow subprocess depth estimation failed. "
+                f"python={py}\n{detail[-4000:]}"
+            )
+        return np.load(output_path).astype(np.float32)
 
 
 def find_cuda_renderer() -> Any | None:
@@ -184,6 +279,22 @@ def estimate_depth(
     allow_luminance_fallback: bool = False,
 ) -> np.ndarray:
     """Estimate depth through the local DepthFlow estimator classes."""
+    mode = os.environ.get("VHS_DEPTHFLOW_ESTIMATE_MODE", "subprocess").strip().lower()
+    if mode in {"subprocess", "auto", ""}:
+        depth = _estimate_depth_subprocess(
+            img_np,
+            estimator,
+            model_size=model_size,
+            da3_resolution=da3_resolution,
+            postprocess=postprocess,
+            sigma=sigma,
+            thicken=thicken,
+        )
+        if depth is not None:
+            return prepare_depth_map(depth, img_np, normalize_mode="auto")
+        if mode == "subprocess":
+            logger.info("DepthFlow subprocess venv not found; falling back to in-process estimator")
+
     setup_depthflow_paths()
     key = (estimator or "da2").lower()
     try:

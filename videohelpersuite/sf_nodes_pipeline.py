@@ -942,8 +942,8 @@ class SF_AddDepthFlow:
                     "tooltip": "DepthFlow ray-march 质量；100 最接近参考路径",
                 }),
                 "backend_policy": (["auto", "cuda_first", "opengl_first", "cuda_only", "opengl_only", "allow_cpu"], {
-                    "default": "cuda_first",
-                    "tooltip": "渲染后端策略；默认优先CUDA并禁止静默CPU低质回退",
+                    "default": "opengl_first",
+                    "tooltip": "渲染后端策略；默认优先OpenGL原生DepthFlow路径并禁止静默CPU低质回退",
                 }),
                 "enable_inpaint": ("BOOLEAN", {
                     "default": False,
@@ -1019,7 +1019,7 @@ class SF_AddDepthFlow:
             center_x=0.0, center_y=0.0, origin_x=0.0, origin_y=0.0,
             mirror=True,
             ssaa=2.0, quality_profile="film", quality_pct=100.0,
-            backend_policy="cuda_first",
+            backend_policy="opengl_first",
             enable_inpaint=False, edge_mode="off", inpaint_threshold=2.2,
             depth_normalize="auto", input_depth_invert=0.0, depth_smooth_sigma=0.0,
             vignette_intensity=0.0, vignette_decay=20.0,

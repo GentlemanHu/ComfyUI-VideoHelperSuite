@@ -16,6 +16,7 @@ from .depthflow_adapter import (
     estimate_depth,
     find_cuda_renderer,
     high_quality_backend_error,
+    _isolate_depthflow_import_path,
     prepare_depth_map,
     setup_depthflow_paths,
     set_depth_pair,
@@ -386,7 +387,6 @@ def _setup_env_paths():
     import sys
     import os
     import platform
-    import importlib
     from pathlib import Path
     
     # --- 1. Linux EGL Environment Setup ---
@@ -431,20 +431,8 @@ def _setup_env_paths():
     node_dir = Path(__file__).resolve().parent.parent # ComfyUI-VideoHelperSuite
     base_dir = node_dir.parent.parent                 # ComfyUI (or ComfyUI/own)
     
-    path_modified = False
+    _isolate_depthflow_import_path()
     
-    # Check node-specific isolated venvs first
-    isolated_venvs = [
-        node_dir / ".venv_depthflow",
-        node_dir / ".venv_shaderflow"
-    ]
-    for venv_path in isolated_venvs:
-        if venv_path.is_dir():
-            venv_libs = list(venv_path.glob("lib/python*/site-packages"))
-            if venv_libs and str(venv_libs[0]) not in sys.path:
-                sys.path.insert(0, str(venv_libs[0]))
-                path_modified = True
-
     # Check global parallel directories as fallbacks
     projects = ["DepthFlow", "ShaderFlow"]
     for proj in projects:
@@ -453,21 +441,9 @@ def _setup_env_paths():
             venv_lib = list(proj_dir.glob('.venv*/lib/python*/site-packages'))
             if venv_lib and str(venv_lib[0]) not in sys.path:
                 sys.path.insert(0, str(venv_lib[0]))
-                path_modified = True
             
             if str(proj_dir) not in sys.path:
                 sys.path.insert(0, str(proj_dir))
-                path_modified = True
-
-    # --- 3. Force Reload Outdated Modules ---
-    if path_modified:
-        # If ComfyUI loaded an old 'attr' from system Python, force reload it from the new venv
-        for mod_name in ["attr", "attrs"]:
-            if mod_name in sys.modules:
-                try:
-                    importlib.reload(sys.modules[mod_name])
-                except Exception:
-                    pass
 
 
 def _estimate_depth_simple(img_np, estimator: str = "da2", params: dict | None = None):
@@ -573,6 +549,7 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             if backend_name == "opengl" and renderer is None:
                 try:
                     _setup_env_paths()
+                    _isolate_depthflow_import_path()
                     setup_depthflow_paths()
                     import depthflow
                     from depthflow.scene import DepthScene
@@ -739,6 +716,7 @@ def _render_df_frame_opengl(scene, w, h, total, frame_idx, params, audio_val: fl
     # Native ShaderFlow updating requires setting scene.tau or using step
     # We will manually construct state
     try:
+        _isolate_depthflow_import_path()
         from depthflow.state import DepthState
         try:
             import depthflow.vhs_animation as dfa
