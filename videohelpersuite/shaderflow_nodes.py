@@ -53,6 +53,42 @@ from .shaderflow_bridge import (
 )
 
 
+def _start_ffmpeg_stream(output_path: str, width: int, height: int,
+                         fps: float, codec: str, audio_path: str = "",
+                         quality: int = 23):
+    tmp_video = output_path + ".tmp.mp4" if audio_path and os.path.exists(audio_path) else output_path
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{width}x{height}", "-pix_fmt", "rgb24",
+        "-r", str(fps), "-i", "-",
+        "-c:v", codec, "-crf", str(quality),
+        "-pix_fmt", "yuv420p",
+        tmp_video,
+    ]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE), tmp_video
+
+
+def _finish_ffmpeg_stream(proc, tmp_video: str, output_path: str, audio_path: str = ""):
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg encoding failed (exit {proc.returncode})")
+
+    if audio_path and os.path.exists(audio_path):
+        mux_cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", tmp_video,
+            "-i", audio_path,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            output_path,
+        ]
+        subprocess.run(mux_cmd, check=True, timeout=120)
+        if tmp_video != output_path:
+            os.remove(tmp_video)
+
+
 # ---------------------------------------------------------------------------
 # Color theme presets
 # ---------------------------------------------------------------------------
@@ -181,8 +217,8 @@ class ShaderFlowAudioVisualizer:
                     "default": "mp4",
                 }),
                 "output_frames": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "是否同时输出帧序列",
+                    "default": False,
+                    "tooltip": "是否同时输出帧序列（高内存）；关闭时仅输出视频和 1x1 占位 IMAGE",
                 }),
             },
         }
@@ -212,7 +248,7 @@ class ShaderFlowAudioVisualizer:
         background_image=None,
         bg_opacity: float = 0.25,
         output_format: str = "mp4",
-        output_frames: bool = True,
+        output_frames: bool = False,
     ):
         if not audio_path or not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -262,104 +298,105 @@ class ShaderFlowAudioVisualizer:
                 bg_np = np.asarray(background_image, dtype=np.uint8)
             bg_img = bg_np
 
-        # Generate frames
-        pbar = ProgressBar(total_frames) if ProgressBar else None
-        frames = []
-        dt = 1.0 / fps
-
-        for fi in range(total_frames):
-            t = fi / fps
-            sample_center = int(t * samplerate)
-            half_window = spec_engine.fft_size // 2
-
-            # Extract audio window
-            start = max(0, sample_center - half_window)
-            end = start + spec_engine.fft_size
-            if end > audio_data.shape[1]:
-                end = audio_data.shape[1]
-                start = max(0, end - spec_engine.fft_size)
-
-            window = audio_data[:, start:end]
-            if window.shape[1] < spec_engine.fft_size:
-                pad = spec_engine.fft_size - window.shape[1]
-                window = np.pad(window, ((0, 0), (0, pad)))
-
-            # Compute spectrum
-            spectrum = spec_engine.compute(window)
-            # Average channels
-            if spectrum.ndim > 1 and spectrum.shape[0] > 1:
-                spectrum_avg = spectrum.mean(axis=0)
-            else:
-                spectrum_avg = spectrum.flatten()
-
-            # Normalize
-            spec_max = spectrum_avg.max()
-            if spec_max > 1e-6:
-                spectrum_avg = spectrum_avg / spec_max
-
-            # Apply dynamics smoothing
-            dynamics.target = spectrum_avg
-            dynamics.next(dt)
-            smoothed = np.clip(dynamics.value, 0, 1)
-
-            # Render frame based on mode
-            if vis_mode == "bars":
-                vis = renderer.render_bars_frame(
-                    smoothed, bg_color=theme["bg"],
-                    bar_colors=theme["bars"],
-                    glow=glow_effect, mirror=mirror_bars,
-                )
-            elif vis_mode == "radial":
-                vis = renderer.render_radial_frame(
-                    smoothed, bg_color=theme["bg"],
-                    bar_colors=theme["bars"],
-                )
-            elif vis_mode == "waveform":
-                # Get raw waveform samples for this frame
-                wf = window.mean(axis=0) if window.ndim > 1 else window.flatten()
-                vis = renderer.render_waveform_frame(
-                    wf, bg_color=theme["bg"],
-                    line_color=theme["waveform"],
-                )
-            elif vis_mode == "bars+waveform":
-                vis = renderer.render_bars_frame(
-                    smoothed, bg_color=theme["bg"],
-                    bar_colors=theme["bars"],
-                    glow=glow_effect, mirror=mirror_bars,
-                )
-                # Overlay waveform
-                wf = window.mean(axis=0) if window.ndim > 1 else window.flatten()
-                wf_frame = renderer.render_waveform_frame(
-                    wf, bg_color=(0, 0, 0),
-                    line_color=theme["waveform"],
-                )
-                vis = np.clip(vis.astype(np.float32) + wf_frame.astype(np.float32) * 0.6,
-                              0, 255).astype(np.uint8)
-            else:
-                vis = renderer.render_bars_frame(smoothed, bg_color=theme["bg"])
-
-            # Composite background
-            vis = renderer.composite_with_background(vis, bg_img, bg_opacity)
-            frames.append(vis)
-
-            if pbar:
-                pbar.update(1)
-
-        # Write video
         out_dir = folder_paths.get_output_directory() if folder_paths else tempfile.gettempdir()
         audio_hash = hashlib.md5(audio_path.encode()).hexdigest()[:8]
         out_path = os.path.join(out_dir, f"shaderflow_vis_{vis_mode}_{audio_hash}.{output_format}")
-
         codec_map = {"mp4": "libx264", "mkv": "libx264", "webm": "libvpx-vp9"}
         codec = codec_map.get(output_format, "libx264")
 
-        write_frames_to_video(
-            frames=frames,
-            output_path=out_path,
-            fps=fps,
-            audio_path=audio_path,
-            codec=codec,
-        )
+        # Generate frames
+        pbar = ProgressBar(total_frames) if ProgressBar else None
+        frames = [] if output_frames else None
+        proc = tmp_video = None
+        if frames is None:
+            proc, tmp_video = _start_ffmpeg_stream(out_path, width, height, fps, codec, audio_path)
+        dt = 1.0 / fps
+
+        try:
+            for fi in range(total_frames):
+                t = fi / fps
+                sample_center = int(t * samplerate)
+                half_window = spec_engine.fft_size // 2
+
+                # Extract audio window
+                start = max(0, sample_center - half_window)
+                end = start + spec_engine.fft_size
+                if end > audio_data.shape[1]:
+                    end = audio_data.shape[1]
+                    start = max(0, end - spec_engine.fft_size)
+
+                window = audio_data[:, start:end]
+                if window.shape[1] < spec_engine.fft_size:
+                    pad = spec_engine.fft_size - window.shape[1]
+                    window = np.pad(window, ((0, 0), (0, pad)))
+
+                spectrum = spec_engine.compute(window)
+                if spectrum.ndim > 1 and spectrum.shape[0] > 1:
+                    spectrum_avg = spectrum.mean(axis=0)
+                else:
+                    spectrum_avg = spectrum.flatten()
+
+                spec_max = spectrum_avg.max()
+                if spec_max > 1e-6:
+                    spectrum_avg = spectrum_avg / spec_max
+
+                dynamics.target = spectrum_avg
+                dynamics.next(dt)
+                smoothed = np.clip(dynamics.value, 0, 1)
+
+                if vis_mode == "bars":
+                    vis = renderer.render_bars_frame(
+                        smoothed, bg_color=theme["bg"],
+                        bar_colors=theme["bars"],
+                        glow=glow_effect, mirror=mirror_bars,
+                    )
+                elif vis_mode == "radial":
+                    vis = renderer.render_radial_frame(
+                        smoothed, bg_color=theme["bg"],
+                        bar_colors=theme["bars"],
+                    )
+                elif vis_mode == "waveform":
+                    wf = window.mean(axis=0) if window.ndim > 1 else window.flatten()
+                    vis = renderer.render_waveform_frame(
+                        wf, bg_color=theme["bg"],
+                        line_color=theme["waveform"],
+                    )
+                elif vis_mode == "bars+waveform":
+                    vis = renderer.render_bars_frame(
+                        smoothed, bg_color=theme["bg"],
+                        bar_colors=theme["bars"],
+                        glow=glow_effect, mirror=mirror_bars,
+                    )
+                    wf = window.mean(axis=0) if window.ndim > 1 else window.flatten()
+                    wf_frame = renderer.render_waveform_frame(
+                        wf, bg_color=(0, 0, 0),
+                        line_color=theme["waveform"],
+                    )
+                    vis = np.clip(vis.astype(np.float32) + wf_frame.astype(np.float32) * 0.6,
+                                  0, 255).astype(np.uint8)
+                else:
+                    vis = renderer.render_bars_frame(smoothed, bg_color=theme["bg"])
+
+                vis = renderer.composite_with_background(vis, bg_img, bg_opacity)
+                if frames is not None:
+                    frames.append(vis)
+                else:
+                    proc.stdin.write(vis.tobytes())
+
+                if pbar:
+                    pbar.update(1)
+        finally:
+            if frames is None and proc is not None:
+                _finish_ffmpeg_stream(proc, tmp_video, out_path, audio_path)
+
+        if frames is not None:
+            write_frames_to_video(
+                frames=frames,
+                output_path=out_path,
+                fps=fps,
+                audio_path=audio_path,
+                codec=codec,
+            )
         logger.info(f"[ShaderFlow] Video saved: {out_path}")
 
         # Convert frames to ComfyUI IMAGE tensor
@@ -373,9 +410,9 @@ class ShaderFlowAudioVisualizer:
 
         if frames_tensor is None:
             if HAS_TORCH:
-                frames_tensor = torch.zeros((1, height, width, 3), dtype=torch.float32)
+                frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
             else:
-                frames_tensor = np.zeros((1, height, width, 3), dtype=np.float32)
+                frames_tensor = np.zeros((1, 1, 1, 3), dtype=np.float32)
 
         return (out_path, frames_tensor)
 
@@ -645,7 +682,8 @@ class ShaderFlowPianoRoll:
                     "default": "mp4",
                 }),
                 "output_frames": ("BOOLEAN", {
-                    "default": True,
+                    "default": False,
+                    "tooltip": "是否同时输出帧序列（高内存）；关闭时仅输出视频和 1x1 占位 IMAGE",
                 }),
             },
         }
@@ -668,7 +706,7 @@ class ShaderFlowPianoRoll:
         key_smooth_zeta: float = 0.6,
         audio_path: str = "",
         output_format: str = "mp4",
-        output_frames: bool = True,
+        output_frames: bool = False,
     ):
         if not midi_path or not os.path.exists(midi_path):
             raise FileNotFoundError(f"MIDI file not found: {midi_path}")
@@ -686,52 +724,63 @@ class ShaderFlowPianoRoll:
                         for _ in range(128)]
 
         pbar = ProgressBar(total_frames) if ProgressBar else None
-        frames = []
-
-        for fi in range(total_frames):
-            t = fi * dt
-
-            # Update per-key dynamics
-            key_vals = np.zeros(128, dtype=np.float32)
-            for n in notes:
-                if n["start"] <= t <= n["end"]:
-                    key_dynamics[n["note"]].target = np.array([float(n["velocity"])], dtype=np.float32)
-                else:
-                    # Only decay if not currently pressed
-                    if key_dynamics[n["note"]].target[0] > 0 and t > n["end"]:
-                        key_dynamics[n["note"]].target = np.array([0.0], dtype=np.float32)
-            for k in range(128):
-                key_dynamics[k].next(dt)
-                key_vals[k] = float(key_dynamics[k].value[0])
-
-            frame = renderer.render_frame(
-                time=t,
-                notes=notes,
-                roll_time=roll_window,
-                min_note=min_note,
-                max_note=max_note,
-                piano_height_ratio=piano_height,
-                key_dynamics=key_vals,
-            )
-            frames.append(frame)
-            if pbar:
-                pbar.update(1)
-
-        # Write video
         out_dir = folder_paths.get_output_directory() if folder_paths else tempfile.gettempdir()
         midi_hash = hashlib.md5(midi_path.encode()).hexdigest()[:8]
         out_path = os.path.join(out_dir, f"shaderflow_piano_{midi_hash}.{output_format}")
 
         codec_map = {"mp4": "libx264", "mkv": "libx264", "webm": "libvpx-vp9"}
         audio_file = audio_path if audio_path and os.path.exists(audio_path) else None
+        codec = codec_map.get(output_format, "libx264")
 
-        write_frames_to_video(
-            frames=frames,
-            output_path=out_path,
-            fps=fps,
-            audio_path=audio_file,
-            codec=codec_map.get(output_format, "libx264"),
-        )
+        frames = [] if output_frames else None
+        proc = tmp_video = None
+        if frames is None:
+            proc, tmp_video = _start_ffmpeg_stream(out_path, width, height, fps, codec, audio_file)
+
+        try:
+            for fi in range(total_frames):
+                t = fi * dt
+
+                # Update per-key dynamics
+                key_vals = np.zeros(128, dtype=np.float32)
+                for n in notes:
+                    if n["start"] <= t <= n["end"]:
+                        key_dynamics[n["note"]].target = np.array([float(n["velocity"])], dtype=np.float32)
+                    else:
+                        # Only decay if not currently pressed
+                        if key_dynamics[n["note"]].target[0] > 0 and t > n["end"]:
+                            key_dynamics[n["note"]].target = np.array([0.0], dtype=np.float32)
+                for k in range(128):
+                    key_dynamics[k].next(dt)
+                    key_vals[k] = float(key_dynamics[k].value[0])
+
+                frame = renderer.render_frame(
+                    time=t,
+                    notes=notes,
+                    roll_time=roll_window,
+                    min_note=min_note,
+                    max_note=max_note,
+                    piano_height_ratio=piano_height,
+                    key_dynamics=key_vals,
+                )
+                if frames is not None:
+                    frames.append(frame)
+                else:
+                    proc.stdin.write(frame.tobytes())
+                if pbar:
+                    pbar.update(1)
+        finally:
+            if frames is None and proc is not None:
+                _finish_ffmpeg_stream(proc, tmp_video, out_path, audio_file)
+
+        if frames is not None:
+            write_frames_to_video(
+                frames=frames,
+                output_path=out_path,
+                fps=fps,
+                audio_path=audio_file,
+                codec=codec,
+            )
         logger.info(f"[ShaderFlow] Piano roll video saved: {out_path}")
 
         frames_tensor = None
@@ -739,7 +788,7 @@ class ShaderFlowPianoRoll:
             arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
             frames_tensor = torch.from_numpy(arr)
         if frames_tensor is None:
-            frames_tensor = torch.zeros((1, height, width, 3), dtype=torch.float32) if HAS_TORCH else np.zeros((1, height, width, 3), dtype=np.float32)
+            frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32) if HAS_TORCH else np.zeros((1, 1, 1, 3), dtype=np.float32)
 
         return (out_path, frames_tensor)
 

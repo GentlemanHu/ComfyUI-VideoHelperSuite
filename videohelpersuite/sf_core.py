@@ -495,30 +495,27 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
     duration = canvas.get("duration", total / max(fps, 1.0))
     import numpy as np
 
-    # Ensure shape alignment (Sanity Check)
-    if depth_np is None:
-        depth_np = _estimate_depth_simple(src_img, params.get("depth_estimator", "da2"), params)
-        
-    if depth_np.shape[:2] != src_img.shape[:2]:
-        try:
-            import cv2
-            depth_np = cv2.resize(depth_np, (src_img.shape[1], src_img.shape[0]))
-        except ImportError:
-            pass
-    depth_np = prepare_depth_map(
-        depth_np,
-        src_img,
-        normalize_mode=params.get("depth_normalize", "auto"),
-        invert_depth=params.get("input_depth_invert", 0.0),
-        smooth_sigma=params.get("depth_smooth_sigma", 0.0),
-    )
-    layer["_depth_np"] = depth_np
+    # Keep native OpenGL fully out-of-process. Only prepare depth in the main
+    # process when a provided map exists, or when a non-CLI backend needs it.
+    if depth_np is not None:
+        if depth_np.shape[:2] != src_img.shape[:2]:
+            try:
+                import cv2
+                depth_np = cv2.resize(depth_np, (src_img.shape[1], src_img.shape[0]))
+            except ImportError:
+                pass
+        depth_np = prepare_depth_map(
+            depth_np,
+            src_img,
+            normalize_mode=params.get("depth_normalize", "auto"),
+            invert_depth=params.get("input_depth_invert", 0.0),
+            smooth_sigma=params.get("depth_smooth_sigma", 0.0),
+        )
+        layer["_depth_np"] = depth_np
 
     # Initialize renderer fallback chain
     if layer.get("_renderer") is None:
         logger.info("[SF] DepthFlow: checking rendering backends...")
-        img_f = src_img.astype(np.float32) / 255.0
-        dep_f = depth_np.astype(np.float32)
         
         renderer = None
         cuda_mod = None
@@ -532,6 +529,18 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             if backend_name == "cuda" and renderer is None:
                 cuda_mod = find_cuda_renderer()
                 if cuda_mod is not None and cuda_mod.is_available():
+                    if depth_np is None:
+                        depth_np = _estimate_depth_simple(src_img, params.get("depth_estimator", "da2"), params)
+                        depth_np = prepare_depth_map(
+                            depth_np,
+                            src_img,
+                            normalize_mode=params.get("depth_normalize", "auto"),
+                            invert_depth=params.get("input_depth_invert", 0.0),
+                            smooth_sigma=params.get("depth_smooth_sigma", 0.0),
+                        )
+                        layer["_depth_np"] = depth_np
+                    img_f = src_img.astype(np.float32) / 255.0
+                    dep_f = depth_np.astype(np.float32)
                     q = _depthflow_quality_settings(params)
                     renderer = ("cuda", cuda_mod.CudaDepthFlowRenderer(
                         img_f, dep_f,
@@ -548,31 +557,34 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
 
             if backend_name == "opengl" and renderer is None:
                 try:
-                    _setup_env_paths()
-                    _isolate_depthflow_import_path()
-                    setup_depthflow_paths()
-                    import depthflow
-                    from depthflow.scene import DepthScene
-                    from shaderflow.scene import WindowBackend
-                    from shaderflow.message import ShaderMessage
-
-                    scene = DepthScene(backend=WindowBackend.Headless)
-                    scene._raw_image = src_img
-                    scene._raw_depth = depth_np
-
-                    scene.initialize()
-                    scene.relay(ShaderMessage.Shader.Compile)
-                    for module in scene.modules:
-                        module.setup()
-
-                    renderer = ("opengl", scene)
-                    logger.info("[SF] DepthFlow: Native OpenGL initialized successfully")
+                    from . import sf_depthflow_cli
+                    renderer = ("opengl_cli", sf_depthflow_cli.init_renderer(
+                        layer,
+                        src_img,
+                        depth_np,
+                        w,
+                        h,
+                        fps,
+                        duration,
+                        params,
+                    ))
+                    logger.info("[SF] DepthFlow: CLI OpenGL initialized successfully")
                 except Exception as e:
-                    logger.info(f"[SF] DepthFlow: Native OpenGL unavailable ({e})")
+                    logger.info(f"[SF] DepthFlow: CLI OpenGL unavailable ({e})")
                     backend_errors.append(f"OpenGL unavailable: {e}")
                 continue
 
             if backend_name == "cpu" and renderer is None:
+                if depth_np is None:
+                    depth_np = _estimate_depth_simple(src_img, params.get("depth_estimator", "da2"), params)
+                    depth_np = prepare_depth_map(
+                        depth_np,
+                        src_img,
+                        normalize_mode=params.get("depth_normalize", "auto"),
+                        invert_depth=params.get("input_depth_invert", 0.0),
+                        smooth_sigma=params.get("depth_smooth_sigma", 0.0),
+                    )
+                    layer["_depth_np"] = depth_np
                 renderer = ("cpu", None)
 
         if renderer is None:
@@ -595,7 +607,10 @@ def _render_depthflow_frame(layer: dict, frame_idx: int, t: float,
             audio_val = rms_arr[min(frame_idx, len(rms_arr)-1)]
             audio_val *= params.get("audio_scale", 1.5)
 
-    if renderer_type == "opengl":
+    if renderer_type == "opengl_cli":
+        from . import sf_depthflow_cli
+        return sf_depthflow_cli.render_frame(renderer_obj, w, h, frame_idx)
+    elif renderer_type == "opengl":
         return _render_df_frame_opengl(renderer_obj, w, h, total, frame_idx, params, audio_val, preset)
     elif renderer_type == "cuda" and cuda_mod is not None:
         return _render_df_frame_cuda(renderer_obj, cuda_mod, w, h, total, frame_idx, params, audio_val, preset)

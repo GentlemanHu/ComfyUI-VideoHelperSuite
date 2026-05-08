@@ -417,7 +417,7 @@ class DF_Render:
         final_path = os.path.abspath(out_path)
 
         if frames_tensor is None:
-            frames_tensor = torch.zeros((1, rh, rw, 3), dtype=torch.float32)
+            frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
         return {
             "ui": {"video": [{"filename": out_name, "subfolder": "depthflow_videos", "type": "output"}]},

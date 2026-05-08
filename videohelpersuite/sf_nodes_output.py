@@ -121,7 +121,21 @@ def _cleanup_layer(layer: Dict):
         
     if layer.get("type") == "depthflow" and layer.get("_renderer"):
         renderer_type, renderer_obj = layer["_renderer"]
-        if renderer_type == "opengl" and renderer_obj is not None:
+        if renderer_type == "opengl_cli" and renderer_obj is not None:
+            cap = renderer_obj.get("cap") if isinstance(renderer_obj, dict) else None
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if isinstance(renderer_obj, dict):
+                for path in renderer_obj.get("cleanup_paths", []):
+                    if path:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+        elif renderer_type == "opengl" and renderer_obj is not None:
             # Force explicit GC for ShaderScene to trigger __del__ which calls opengl.release() and window.destroy()
             del renderer_obj
         elif renderer_type == "cuda" and renderer_obj is not None:
@@ -322,6 +336,10 @@ class SF_RenderToVideo:
             else:
                 frames_tensor = arr
             logger.info(f"[SF] Frames tensor: shape={arr.shape}, {arr.nbytes / 1024 / 1024:.1f} MB")
+        elif HAS_TORCH:
+            frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        else:
+            frames_tensor = np.zeros((1, 1, 1, 3), dtype=np.float32)
 
         return (out_path, frames_tensor)
 

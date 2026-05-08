@@ -791,6 +791,10 @@ class SF_PipelineRender:
                 frames_tensor = torch.from_numpy(arr)
             else:
                 frames_tensor = arr
+        elif HAS_TORCH:
+            frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        else:
+            frames_tensor = np.zeros((1, 1, 1, 3), dtype=np.float32)
 
         return (out_path, frames_tensor)
 

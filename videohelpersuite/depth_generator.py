@@ -581,8 +581,8 @@ class DepthFlowGenerator:
                 
                 # Depth extraction settings
                 "output_frames": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "输出视频帧 | True: 生成并返回所有视频帧 | False: 仅生成视频文件"
+                    "default": False,
+                    "tooltip": "输出视频帧 | True: 生成并返回所有视频帧（高内存） | False: 仅生成视频文件，不解码/保留帧"
                 }),
                 "max_frames_export": ("INT", {
                     "default": 0, "min": 0, "max": 10000, "step": 1,
@@ -796,7 +796,7 @@ class DepthFlowGenerator:
         output_format="mp4",
         video_codec="h264",
         depth_estimator="da2",
-        output_frames=True,
+        output_frames=False,
         max_frames_export=0,
         cuda_enable_inpaint=False,
         cuda_inpaint_threshold=3.0,
@@ -923,12 +923,10 @@ class DepthFlowGenerator:
                 frames_tensor = torch.stack(captured).float() / 255.0
                 print(f"[DepthFlow] ✓ Frames tensor: {frames_tensor.shape} "
                       f"({frames_tensor.nbytes / (1024**2):.0f} MB)")
-                self._cuda_captured_frames = None  # free memory
+            self._cuda_captured_frames = None  # free memory
 
             if frames_tensor is None:
-                frames_tensor = torch.zeros(
-                    (1, target_height, target_width, 3), dtype=torch.float32,
-                )
+                frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
             return {
                 "ui": {
@@ -1248,8 +1246,8 @@ class DepthFlowGenerator:
                 print(f"[DepthFlow] Continuing without frame extraction...")
                 frames_tensor = None
         else:
-            # 返回空张量以维持返回类型一致性
-            frames_tensor = torch.zeros((1, target_height, target_width, 3), dtype=torch.float32)
+            # Keep IMAGE return type without allocating a full-resolution frame.
+            frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
         return {
             "ui": {
@@ -1259,7 +1257,7 @@ class DepthFlowGenerator:
                     "type": "output"
                 }]
             },
-            "result": (final_path, frames_tensor if frames_tensor is not None else torch.zeros((1, target_height, target_width, 3), dtype=torch.float32))
+            "result": (final_path, frames_tensor if frames_tensor is not None else torch.zeros((1, 1, 1, 3), dtype=torch.float32))
         }
 
     # ================================================================
@@ -1286,9 +1284,7 @@ class DepthFlowGenerator:
                 print(f"[DepthFlow] ✗ Frame extraction failed: {e}")
                 frames_tensor = None
         if frames_tensor is None:
-            frames_tensor = torch.zeros(
-                (1, target_height, target_width, 3), dtype=torch.float32,
-            )
+            frames_tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
         return {
             "ui": {
                 "video": [{
@@ -1306,7 +1302,7 @@ class DepthFlowGenerator:
         camera_movement, movement_intensity, movement_smooth,
         movement_loop, movement_reverse, movement_phase,
         steady_depth, isometric, video_codec, depth_estimator,
-        output_frames=True, max_frames_export=0,
+        output_frames=False, max_frames_export=0,
         cuda_enable_inpaint=False,
         cuda_inpaint_threshold=3.0,
         cuda_enable_aa=True,
