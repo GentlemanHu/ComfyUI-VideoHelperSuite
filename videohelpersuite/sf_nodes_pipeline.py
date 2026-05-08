@@ -804,6 +804,10 @@ class SF_PipelineRender:
         pbar = ProgressBar(100) if ProgressBar else None
         collected = [] if output_frames else None
 
+        logger.info("[SF Pipeline] Preparing first frame before final ffmpeg start")
+        first_frame = _composite_all_layers(all_layers, 0, canvas, w, h)
+        logger.info("[SF Pipeline] First frame ready; starting final ffmpeg encoder")
+
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         logger.info(
             f"[SF Pipeline] Final compose/encode start: frames={total}, "
@@ -813,7 +817,12 @@ class SF_PipelineRender:
         last_report_ts = start_ts
         report_every_frames = max(1, total // 20)
         try:
-            for fi in range(total):
+            proc.stdin.write(first_frame.tobytes())
+            if collected is not None:
+                collected.append(first_frame)
+            logger.info(f"[SF Pipeline] Final compose/encode frame 1/{total} ({100.0 / total:.1f}%)")
+
+            for fi in range(1, total):
                 frame = _composite_all_layers(all_layers, fi, canvas, w, h)
                 proc.stdin.write(frame.tobytes())
                 if collected is not None:
