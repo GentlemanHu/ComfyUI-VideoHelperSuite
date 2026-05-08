@@ -370,6 +370,7 @@ def _render_video_streaming(
             tau = i / max(total - 1, 1)
             if i == 0:
                 sharp_engine.log_info("Render first frame start: streaming directly to ffmpeg")
+            render_t0 = time.perf_counter()
             frame = sharp_engine.render_frame(
                 scene,
                 camera,
@@ -387,13 +388,17 @@ def _render_video_streaming(
                 source_photo_strength=float(source_photo_strength),
                 fill_alpha_holes=bool(fill_alpha_holes),
             )
+            render_elapsed = time.perf_counter() - render_t0
+            write_t0 = time.perf_counter()
             _write_frame_to_ffmpeg(proc, frame)
+            write_elapsed = time.perf_counter() - write_t0
             del frame
             pbar.update_absolute(i + 1, total)
             if i == 0 or (i + 1) % max(1, total // 8) == 0 or i == total - 1:
                 sharp_engine.log_info(
                     f"Render stream progress: {i + 1}/{total} frames, "
-                    f"last_frame={time.perf_counter() - frame_t0:.3f}s"
+                    f"render={render_elapsed:.3f}s write={write_elapsed:.3f}s "
+                    f"total={time.perf_counter() - frame_t0:.3f}s"
                 )
     except Exception:
         if proc.stdin:
