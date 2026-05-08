@@ -660,6 +660,7 @@ class VHSSharpRenderVideo:
             f"resolution_mode={resolution_mode}, output={out_w}x{out_h}, "
             f"codec={video_codec}, output_frames={bool(output_frames)}"
         )
+        sharp_engine.ensure_official_renderer_available(str(render_backend), str(render_mode))
         if bool(output_frames):
             frames = _render_frames(
                 scene,
@@ -776,6 +777,10 @@ class VHSSharpImageToVideo:
             f"preset={performance_preset}, gaussian_budget={budget}, min_opacity={min_opacity_value}, "
             f"render_mode={kwargs.get('render_mode', 'photo_composite')}, codec={kwargs.get('video_codec', 'h264')}, "
             f"output_frames={bool(kwargs.get('output_frames', False))}"
+        )
+        sharp_engine.ensure_official_renderer_available(
+            str(kwargs.get("render_backend", "auto")),
+            str(kwargs.get("render_mode", "photo_composite")),
         )
         scene = sharp_engine.make_scene(
             image,

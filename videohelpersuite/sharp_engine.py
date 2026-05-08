@@ -718,6 +718,34 @@ def _import_gsplat_with_optional_install():
         import gsplat
         log_info("Official gsplat renderer installed; restart ComfyUI if import/cache issues appear.")
         return gsplat
+
+
+def requires_official_renderer(render_mode: str) -> bool:
+    return str(render_mode or "photo_composite").lower() == "photo_composite"
+
+
+def ensure_official_renderer_available(render_backend: str = "auto", render_mode: str = "photo_composite"):
+    if not requires_official_renderer(render_mode):
+        return
+    device = render_device(render_backend)
+    if device.type != "cuda":
+        raise RuntimeError(
+            "SHARP photo_composite rendering requires CUDA + gsplat before scene build. "
+            f"Current render device is {device}. Choose render_mode=source_static, gaussian_color, depth, or alpha "
+            "when CUDA gsplat is unavailable."
+        )
+    try:
+        _import_gsplat_with_optional_install()
+    except Exception as exc:
+        raise RuntimeError(
+            "SHARP photo_composite rendering requires the official gsplat renderer, but gsplat is not importable. "
+            f"Platform={platform.system()}, Python={sys.executable}. "
+            "Install a gsplat build compatible with this Python/PyTorch/CUDA environment, then restart ComfyUI. "
+            "If gsplat is not available on this system, use render_mode=source_static, gaussian_color, depth, or alpha. "
+            f"Original import error: {exc}"
+        ) from exc
+
+
 def _sharp_intrinsics(scene: SharpScene, width: int, height: int, device: torch.device) -> torch.Tensor:
     src_w, src_h = scene.source_size
     fx = float(scene.focal_px) * float(width) / max(float(src_w), 1.0)
