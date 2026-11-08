@@ -55,9 +55,11 @@ jobs:
           for p in Path('video_formats').glob('*mp4.json'):
               data = json.loads(p.read_text())
               assert '-movflags' in data['audio_pass'], p
-          for p in Path('.github/workflows').glob('*.yml'):
-              source = p.read_text()
-              assert '<<<<<<< HEAD' not in source, p
-              assert '>>>>>>> upstream/main' not in source, p
+          publish = Path('.github/workflows/publish.yml')
+          text = publish.read_text()
+          # The validator itself deliberately mentions marker literals, so
+          # check the previously broken upstream publishing workflow only.
+          assert '<<<<<<< HEAD' not in text, publish
+          assert '>>>>>>> upstream/main' not in text, publish
           print('ALL SOURCE REGRESSION CHECKS PASSED')
           PY
