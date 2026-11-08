@@ -33,6 +33,7 @@ from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_wor
         imageOrLatent, BIGMAX, merge_filter_args, ENCODE_ARGS, floatOrInt, cached, \
         ContainsAll
 from comfy.utils import ProgressBar
+from comfy_api.v0_0_2 import IO
 
 # Import custom additions (按能力分组，避免单点导入失败导致全部不可用)
 HAS_VIDEO_OPS = False
@@ -88,8 +89,13 @@ try:
         MovisFontPreview,
     )
     HAS_VIDEO_OPS = True
-except ImportError:
-    print("video_ops not available")
+except Exception as exc:
+    # Preserve core VHS/DepthFlow/SHARP even if optional movis/Qt fails.
+    # Show the actual missing dependency instead of silently creating broken
+    # MOVIS INPUT_TYPES nodes (previously raised NameError get_movis_fonts).
+    import traceback
+    print(f"[VHS] video_ops unavailable; MOVIS nodes will not be registered: {type(exc).__name__}: {exc}")
+    traceback.print_exc()
 
 try:
     from .depth_generator import *
@@ -445,7 +451,7 @@ class VideoCombine:
         video_metadata = {}
         if prompt is not None:
             metadata.add_text("prompt", json.dumps(prompt))
-            video_metadata["prompt"] = json.dumps(prompt)
+            video_metadata["prompt"] = prompt
         if extra_pnginfo is not None:
             for x in extra_pnginfo:
                 metadata.add_text(x, json.dumps(extra_pnginfo[x]))
@@ -1093,19 +1099,25 @@ class SelectFilename:
     def select_filename(self, filenames, index):
         return (filenames[1][index],)
 
-class Unbatch:
-    class Any(str):
-        def __ne__(self, other):
-            return False
+class Unbatch(IO.ComfyNode):
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {"batched": ("*",)}}
-    RETURN_TYPES = (Any('*'),)
-    INPUT_IS_LIST = True
-    RETURN_NAMES =("unbatched",)
-    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
-    FUNCTION = "unbatch"
-    def unbatch(self, batched):
+    def define_schema(cls):
+        template = IO.MatchType.Template("type")
+        return IO.Schema(
+            node_id="VHS_Unbatch",
+            display_name="Unbatch 🎥🅥🅗🅢",
+            category = "Video Helper Suite 🎥🅥🅗🅢",
+            is_input_list = True,
+            inputs=[
+                IO.MatchType.Input("batched", template=template),
+            ],
+            outputs=[
+                IO.MatchType.Output(template=template, display_name="unbatched"),
+            ],
+        )
+
+    @classmethod
+    async def execute(cls, batched):
         if isinstance(batched[0], torch.Tensor):
             return (torch.cat(batched),)
         if isinstance(batched[0], dict):
@@ -1117,10 +1129,6 @@ class Unbatch:
             out.pop('batch_index', None)
             return (out,)
         return (functools.reduce(lambda x,y: x+y, batched),)
-    @classmethod
-    def VALIDATE_INPUTS(cls, input_types):
-        return True
-
 
 class SelectLatest:
     @classmethod
@@ -2986,98 +2994,99 @@ if HAS_CUSTOM_FEATURES:
     if 'VideoGentleCaptionsPro' in globals():
         NODE_CLASS_MAPPINGS.update({"VHS_VideoGentleCaptionsPro": VideoGentleCaptionsPro})
         NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_VideoGentleCaptionsPro": "Video Gentle Captions Pro 🧠🎥🅥🅗🅢"})
-    if 'MovisSubtitleFromSRT' in globals():
+    if HAS_VIDEO_OPS and 'MovisSubtitleFromSRT' in globals():
         NODE_CLASS_MAPPINGS.update({"VHS_MOVIS_SubtitleFromSRT": MovisSubtitleFromSRT})
         NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_MOVIS_SubtitleFromSRT": "Movis Subtitle From SRT 🎬📝🎥🅥🅗🅢"})
-    if 'MovisAutoCaptionTimeline' in globals():
+    if HAS_VIDEO_OPS and 'MovisAutoCaptionTimeline' in globals():
         NODE_CLASS_MAPPINGS.update({"VHS_MOVIS_AutoCaptionTimeline": MovisAutoCaptionTimeline})
         NODE_DISPLAY_NAME_MAPPINGS.update({"VHS_MOVIS_AutoCaptionTimeline": "Movis Auto Caption Timeline 🎬🤖📝🎥🅥🅗🅢"})
     
-    # Try to add video_ops nodes if available
-    try:
-        NODE_CLASS_MAPPINGS.update({
-            "VHS_MOVIS_CreateTimeline": MovisCreateTimeline,
-            "VHS_MOVIS_AddVideoTrack": MovisAddVideoTrack,
-            "VHS_MOVIS_AddImageTrack": MovisAddImageTrack,
-            "VHS_MOVIS_MergeTimeline": MovisMergeTimeline,
-            "VHS_MOVIS_AddImageTrackSequence": MovisAddImageSequenceTrack,
-            "VHS_MOVIS_AddImageMotionTrack": MovisAddImageMotionTrack,
-            "VHS_MOVIS_AddVideoMotionTrack": MovisAddVideoMotionTrack,
-            "VHS_MOVIS_AddAudioTrack": MovisAddAudioTrack,
-            "VHS_MOVIS_SetBGM": MovisSetBGM,
-            "VHS_MOVIS_AddTextOverlay": MovisAddTextOverlay,
-            "VHS_MOVIS_RenderTimeline": MovisRenderTimeline,
-            "VHS_MOVIS_Assemble": MovisAssemble,
-            "VHS_MOVIS_UniversalStudio": MovisUniversalStudio,
-            "VHS_MOVIS_SmartMerge": MovisSmartMerge,
-            "VHS_MOVIS_SetGlobalTransition": MovisSetGlobalTransition,
-            "VHS_MOVIS_SetClipTransition": MovisSetClipTransition,
-            "VHS_MOVIS_AddClipFX": MovisAddClipFX,
-            "VHS_MOVIS_ApplyFXPreset": MovisApplyFXPreset,
-            "VHS_MOVIS_EnableLayeredFXEngine": MovisEnableLayeredFXEngine,
-            "VHS_MOVIS_AddClipFXLayered": MovisAddClipFXLayered,
-            "VHS_MOVIS_ApplyFXPresetLayered": MovisApplyFXPresetLayered,
-            "VHS_MOVIS_GPUShaderRender": MovisGPUShaderRender,
-            "VHS_MOVIS_SetClipShader": MovisSetClipShader,
-            "VHS_MOVIS_TrimClip": MovisTrimClip,
-            "VHS_MOVIS_DeleteClip": MovisDeleteClip,
-            "VHS_MOVIS_TimelinePro": MovisTimelinePro,
-            "VHS_MOVIS_COMPOSITE": CompositeMedia,
-            "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
-            "VHS_MOVIS_BuildFX": MovisBuildFX,
-            "VHS_MOVIS_BuildFXPreset": MovisBuildFXPreset,
-            "VHS_MOVIS_ChainFX": MovisChainFX,
-            "VHS_MOVIS_BuildShader": MovisBuildShader,
-            "VHS_MOVIS_BuildAudio": MovisBuildAudio,
-            "VHS_MOVIS_ChainAudio": MovisChainAudio,
-            "VHS_MOVIS_BatchAddVideoTracks": MovisBatchAddVideoTracks,
-            "VHS_MOVIS_QuickBuildTimeline": MovisQuickBuildTimeline,
-            "VHS_MOVIS_RefreshFonts": MovisRefreshFonts,
-            "VHS_MOVIS_FontPreview": MovisFontPreview,
-        })
-        NODE_DISPLAY_NAME_MAPPINGS.update({
-            "VHS_MOVIS_CreateTimeline": "Movis Create Timeline 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddVideoTrack": "Movis Add Video Track 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddImageTrack": "Movis Add Image (Path) 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_MergeTimeline": "Movis Merge Timeline 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddImageTrackSequence": "Movis Add Image Sequence (Tensor) 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddImageMotionTrack": "Movis Add Image Motion 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddVideoMotionTrack": "Movis Add Video Motion 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddAudioTrack": "Movis Add Audio Track 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_SetBGM": "Movis Set BGM 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddTextOverlay": "Movis Add Text Overlay 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_RenderTimeline": "Movis Render Timeline 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_Assemble": "Movis Assemble (All-in-One) 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_UniversalStudio": "Movis Universal Studio (Pro) 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_SmartMerge": "Movis Smart Merge 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_SetGlobalTransition": "Movis Set Global Transition 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_SetClipTransition": "Movis Set Clip Transition 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_AddClipFX": "Movis Add Clip FX (Shader-like) 🎬✨🎥🅥🅗🅢",
-            "VHS_MOVIS_ApplyFXPreset": "Movis Apply FX Preset 🎬⚡🎥🅥🅗🅢",
-            "VHS_MOVIS_EnableLayeredFXEngine": "Movis Enable Layered FX Engine 🎬🧠🎥🅥🅗🅢",
-            "VHS_MOVIS_AddClipFXLayered": "Movis Add Clip FX Layered 🎬✨🧠🎥🅥🅗🅢",
-            "VHS_MOVIS_ApplyFXPresetLayered": "Movis Apply FX Preset Layered 🎬⚡🧠🎥🅥🅗🅢",
-            "VHS_MOVIS_GPUShaderRender": "Movis GPU Shader Render (GLSL) 🎬🧠🎥🅥🅗🅢",
-            "VHS_MOVIS_SetClipShader": "Movis Set Clip Shader (GLSL) 🎬🧠✨🎥🅥🅗🅢",
-            "VHS_MOVIS_TrimClip": "Movis Trim Clip 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_DeleteClip": "Movis Delete Clip 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_TimelinePro": "Movis Timeline Pro 🎬🎥🅥🅗🅢",
-            "VHS_MOVIS_COMPOSITE": "Movis Composite (Deprecated) 🎥🅥🅗🅢",
-            "VHS_MOVIS_MultiVideo": "Movis Multi-Video (Deprecated) 🎥🅥🅗🅢",
-            "VHS_MOVIS_BuildFX": "Movis Build FX 🎬✨🎥🅥🅗🅢",
-            "VHS_MOVIS_BuildFXPreset": "Movis Build FX Preset 🎬⚡🎥🅥🅗🅢",
-            "VHS_MOVIS_ChainFX": "Movis Chain FX 🎬🔗🎥🅥🅗🅢",
-            "VHS_MOVIS_BuildShader": "Movis Build Shader 🎬🧠🔧🎥🅥🅗🅢",
-            "VHS_MOVIS_BuildAudio": "Movis Build Audio 🎬🎵🎥🅥🅗🅢",
-            "VHS_MOVIS_ChainAudio": "Movis Chain Audio 🎬🔗🎶🎥🅥🅗🅢",
-            "VHS_MOVIS_BatchAddVideoTracks": "Movis Batch Add Video Tracks 🎬📦🎥🅥🅗🅢",
-            "VHS_MOVIS_QuickBuildTimeline": "Movis Quick Build Timeline 🎬⚡🔒🎥🅥🅗🅢",
-            "VHS_MOVIS_RefreshFonts": "Movis Refresh Fonts 🔄🔤🎥🅥🅗🅢",
-            "VHS_MOVIS_FontPreview": "Movis Font Preview 🔤🖼️🎥🅥🅗🅢",
-        })
-    except NameError:
-        print("Movis nodes not available")
-    
+    # Try to add video_ops nodes only after importing all their dependencies.
+    if HAS_VIDEO_OPS:
+        try:
+            NODE_CLASS_MAPPINGS.update({
+                "VHS_MOVIS_CreateTimeline": MovisCreateTimeline,
+                "VHS_MOVIS_AddVideoTrack": MovisAddVideoTrack,
+                "VHS_MOVIS_AddImageTrack": MovisAddImageTrack,
+                "VHS_MOVIS_MergeTimeline": MovisMergeTimeline,
+                "VHS_MOVIS_AddImageTrackSequence": MovisAddImageSequenceTrack,
+                "VHS_MOVIS_AddImageMotionTrack": MovisAddImageMotionTrack,
+                "VHS_MOVIS_AddVideoMotionTrack": MovisAddVideoMotionTrack,
+                "VHS_MOVIS_AddAudioTrack": MovisAddAudioTrack,
+                "VHS_MOVIS_SetBGM": MovisSetBGM,
+                "VHS_MOVIS_AddTextOverlay": MovisAddTextOverlay,
+                "VHS_MOVIS_RenderTimeline": MovisRenderTimeline,
+                "VHS_MOVIS_Assemble": MovisAssemble,
+                "VHS_MOVIS_UniversalStudio": MovisUniversalStudio,
+                "VHS_MOVIS_SmartMerge": MovisSmartMerge,
+                "VHS_MOVIS_SetGlobalTransition": MovisSetGlobalTransition,
+                "VHS_MOVIS_SetClipTransition": MovisSetClipTransition,
+                "VHS_MOVIS_AddClipFX": MovisAddClipFX,
+                "VHS_MOVIS_ApplyFXPreset": MovisApplyFXPreset,
+                "VHS_MOVIS_EnableLayeredFXEngine": MovisEnableLayeredFXEngine,
+                "VHS_MOVIS_AddClipFXLayered": MovisAddClipFXLayered,
+                "VHS_MOVIS_ApplyFXPresetLayered": MovisApplyFXPresetLayered,
+                "VHS_MOVIS_GPUShaderRender": MovisGPUShaderRender,
+                "VHS_MOVIS_SetClipShader": MovisSetClipShader,
+                "VHS_MOVIS_TrimClip": MovisTrimClip,
+                "VHS_MOVIS_DeleteClip": MovisDeleteClip,
+                "VHS_MOVIS_TimelinePro": MovisTimelinePro,
+                "VHS_MOVIS_COMPOSITE": CompositeMedia,
+                "VHS_MOVIS_MultiVideo": CompositeMultiVideo,
+                "VHS_MOVIS_BuildFX": MovisBuildFX,
+                "VHS_MOVIS_BuildFXPreset": MovisBuildFXPreset,
+                "VHS_MOVIS_ChainFX": MovisChainFX,
+                "VHS_MOVIS_BuildShader": MovisBuildShader,
+                "VHS_MOVIS_BuildAudio": MovisBuildAudio,
+                "VHS_MOVIS_ChainAudio": MovisChainAudio,
+                "VHS_MOVIS_BatchAddVideoTracks": MovisBatchAddVideoTracks,
+                "VHS_MOVIS_QuickBuildTimeline": MovisQuickBuildTimeline,
+                "VHS_MOVIS_RefreshFonts": MovisRefreshFonts,
+                "VHS_MOVIS_FontPreview": MovisFontPreview,
+            })
+            NODE_DISPLAY_NAME_MAPPINGS.update({
+                "VHS_MOVIS_CreateTimeline": "Movis Create Timeline 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddVideoTrack": "Movis Add Video Track 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddImageTrack": "Movis Add Image (Path) 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_MergeTimeline": "Movis Merge Timeline 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddImageTrackSequence": "Movis Add Image Sequence (Tensor) 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddImageMotionTrack": "Movis Add Image Motion 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddVideoMotionTrack": "Movis Add Video Motion 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddAudioTrack": "Movis Add Audio Track 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_SetBGM": "Movis Set BGM 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddTextOverlay": "Movis Add Text Overlay 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_RenderTimeline": "Movis Render Timeline 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_Assemble": "Movis Assemble (All-in-One) 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_UniversalStudio": "Movis Universal Studio (Pro) 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_SmartMerge": "Movis Smart Merge 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_SetGlobalTransition": "Movis Set Global Transition 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_SetClipTransition": "Movis Set Clip Transition 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_AddClipFX": "Movis Add Clip FX (Shader-like) 🎬✨🎥🅥🅗🅢",
+                "VHS_MOVIS_ApplyFXPreset": "Movis Apply FX Preset 🎬⚡🎥🅥🅗🅢",
+                "VHS_MOVIS_EnableLayeredFXEngine": "Movis Enable Layered FX Engine 🎬🧠🎥🅥🅗🅢",
+                "VHS_MOVIS_AddClipFXLayered": "Movis Add Clip FX Layered 🎬✨🧠🎥🅥🅗🅢",
+                "VHS_MOVIS_ApplyFXPresetLayered": "Movis Apply FX Preset Layered 🎬⚡🧠🎥🅥🅗🅢",
+                "VHS_MOVIS_GPUShaderRender": "Movis GPU Shader Render (GLSL) 🎬🧠🎥🅥🅗🅢",
+                "VHS_MOVIS_SetClipShader": "Movis Set Clip Shader (GLSL) 🎬🧠✨🎥🅥🅗🅢",
+                "VHS_MOVIS_TrimClip": "Movis Trim Clip 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_DeleteClip": "Movis Delete Clip 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_TimelinePro": "Movis Timeline Pro 🎬🎥🅥🅗🅢",
+                "VHS_MOVIS_COMPOSITE": "Movis Composite (Deprecated) 🎥🅥🅗🅢",
+                "VHS_MOVIS_MultiVideo": "Movis Multi-Video (Deprecated) 🎥🅥🅗🅢",
+                "VHS_MOVIS_BuildFX": "Movis Build FX 🎬✨🎥🅥🅗🅢",
+                "VHS_MOVIS_BuildFXPreset": "Movis Build FX Preset 🎬⚡🎥🅥🅗🅢",
+                "VHS_MOVIS_ChainFX": "Movis Chain FX 🎬🔗🎥🅥🅗🅢",
+                "VHS_MOVIS_BuildShader": "Movis Build Shader 🎬🧠🔧🎥🅥🅗🅢",
+                "VHS_MOVIS_BuildAudio": "Movis Build Audio 🎬🎵🎥🅥🅗🅢",
+                "VHS_MOVIS_ChainAudio": "Movis Chain Audio 🎬🔗🎶🎥🅥🅗🅢",
+                "VHS_MOVIS_BatchAddVideoTracks": "Movis Batch Add Video Tracks 🎬📦🎥🅥🅗🅢",
+                "VHS_MOVIS_QuickBuildTimeline": "Movis Quick Build Timeline 🎬⚡🔒🎥🅥🅗🅢",
+                "VHS_MOVIS_RefreshFonts": "Movis Refresh Fonts 🔄🔤🎥🅥🅗🅢",
+                "VHS_MOVIS_FontPreview": "Movis Font Preview 🔤🖼️🎥🅥🅗🅢",
+            })
+        except NameError:
+            print("Movis nodes not available")
+        
     # Try to add depth generator and video preview nodes if available
     try:
         NODE_CLASS_MAPPINGS.update({

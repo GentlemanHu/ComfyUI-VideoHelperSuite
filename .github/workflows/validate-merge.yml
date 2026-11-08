@@ -1,0 +1,63 @@
+name: Validate VHS upstream merge and MOVIS fallback
+
+on:
+  push:
+    branches:
+      - main
+      - sync/upstream-20261108-movis-fix
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check Python syntax without importing optional GPU libraries
+        run: |
+          python -m compileall -q videohelpersuite __init__.py
+      - name: Check JS syntax
+        run: |
+          node --check web/js/VHS.core.js
+      - name: Validate all video format files and required safe fallbacks
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in Path('video_formats').glob('*.json'):
+              json.loads(path.read_text(encoding='utf-8'))
+
+          nodes = Path('videohelpersuite/nodes.py').read_text()
+          assert 'from comfy_api.v0_0_2 import IO' in nodes
+          assert 'class Unbatch(IO.ComfyNode)' in nodes
+          assert 'if HAS_VIDEO_OPS and \'MovisSubtitleFromSRT\' in globals():' in nodes
+          assert 'if HAS_VIDEO_OPS and \'MovisAutoCaptionTimeline\' in globals():' in nodes
+          assert 'if HAS_VIDEO_OPS:\n        try:' in nodes
+          assert 'traceback.print_exc()' in nodes
+          assert 'get_movis_fonts,' in nodes
+          assert 'VHS_SHARP_ImageToVideo' in nodes
+          assert 'VHS_MOVIS_CreateTimeline' in nodes
+          assert 'video_metadata["prompt"] = prompt' in nodes
+
+          js = Path('web/js/VHS.core.js').read_text()
+          assert 'function cloneType(' not in js
+          assert 'nodeData?.name == "VHS_Unbatch"' not in js
+          assert 'text = String(text)' in js
+          assert 'const s = this.options.step ?? 1' in js
+          assert "'H3':" in Path('videohelpersuite/load_video_nodes.py').read_text()
+          for p in Path('video_formats').glob('*mp4.json'):
+              data = json.loads(p.read_text())
+              assert '-movflags' in data['audio_pass'], p
+          for p in Path('.github/workflows').glob('*.yml'):
+              source = p.read_text()
+              assert '<<<<<<< HEAD' not in source, p
+              assert '>>>>>>> upstream/main' not in source, p
+          print('ALL SOURCE REGRESSION CHECKS PASSED')
+          PY
